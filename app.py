@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 import sqlite3
 import pandas as pd
+import time
 
 st.set_page_config(page_title="Gabaritar - Sistema OMR", page_icon="📝", layout="wide")
 
@@ -196,7 +197,6 @@ with aba_gerar:
 with aba_corrigir:
     st.write("Tire uma foto nítida do cabeçalho da prova para corrigir.")
     
-    # Cofre de dados da sessão para blindar contra recarregamentos da interface
     if 'imagem_processada' not in st.session_state:
         st.session_state.imagem_processada = None
     if 'resultado_analise' not in st.session_state:
@@ -211,12 +211,20 @@ with aba_corrigir:
         st.session_state.sucesso_salvamento = False
     
     if foto_prova is not None and st.session_state.imagem_processada != foto_prova.file_id:
-        with st.spinner("Decodificando QR Code e Analisando Bolinhas..."):
+        
+        # Inicia o container de status visual da operação
+        with st.status("Iniciando escaneamento da prova...", expanded=True) as status:
+            
+            # Passo 1
+            st.write("📸 Foto carregada na memória com sucesso.")
+            time.sleep(0.5) # Leve delay visual para o usuário conseguir ler
+            
             bytes_data = foto_prova.getvalue()
             array_np = np.frombuffer(bytes_data, np.uint8)
             img_cv2_orig = cv2.imdecode(array_np, cv2.IMREAD_COLOR)
             
-            # 1. Lê o QR Code na imagem ORIGINAL (para não perder definição do texto)
+            # Passo 2
+            st.write("🔍 Extraindo informações do QR Code...")
             cinza_orig = cv2.cvtColor(img_cv2_orig, cv2.COLOR_BGR2GRAY)
             detector_qr = cv2.QRCodeDetector()
             conteudo_qr, _, _ = detector_qr.detectAndDecode(cinza_orig)
@@ -232,10 +240,18 @@ with aba_corrigir:
                         if "-" in p:
                             _, resposta = p.split("-")
                             gabarito_oficial.append(resposta.strip())
+                    st.write(f"✅ Respostas extraídas: A chave do ID **{prova_id_detectada}** foi carregada.")
                 else:
                     prova_id_detectada = conteudo_qr
+                    st.write(f"⚠️ Atenção: QR lido ({prova_id_detectada}), mas sem gabarito atrelado.")
+            else:
+                status.update(label="Falha na leitura do QR Code", state="error", expanded=True)
+                st.error("❌ O sistema não encontrou o QR Code. Aproxime a câmera do canto direito do cabeçalho.")
+                st.stop() # Interrompe o processamento aqui se não achar o QR
             
-            # 2. Redimensiona a imagem para padronizar o tamanho dos círculos para a leitura (OMR)
+            # Passo 3
+            st.write("⚙️ Analisando gabarito na imagem...")
+            
             alt_orig, larg_orig = img_cv2_orig.shape[:2]
             nova_larg = 1000
             prop = nova_larg / float(larg_orig)
@@ -252,27 +268,27 @@ with aba_corrigir:
             total_questoes = len(gabarito_oficial)
             
             if total_questoes > 0:
-                # 3. Busca bolinhas na imagem redimensionada
-                # RETR_EXTERNAL ignora bordas duplas da mesma bolinha
                 contornos, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 bolinhas_validas = []
                 
                 for c in contornos:
                     (x, y, w, h) = cv2.boundingRect(c)
                     proporcao = w / float(h)
-                    # Com largura padronizada em 1000px, as bolinhas reais ficam entre 15 e 60 pixels
                     if 0.7 <= proporcao <= 1.3 and 15 <= w <= 60:
                         bolinhas_validas.append(c)
                 
                 bolinhas_esperadas = total_questoes * 5
                 
+                st.write(f"ℹ️ Encontradas {len(bolinhas_validas)} formas circulares (Esperado: {bolinhas_esperadas}).")
+                
                 if len(bolinhas_validas) >= bolinhas_esperadas:
-                    # Ordena de cima para baixo (Linhas/Questões)
+                    # Passo 4
+                    st.write("📝 Processando marcações e calculando nota...")
+                    
                     bolinhas_validas = sorted(bolinhas_validas, key=lambda b: cv2.boundingRect(b)[1])
                     
                     for i in range(0, min(len(bolinhas_validas), bolinhas_esperadas), 5):
                         linha = bolinhas_validas[i:i+5]
-                        # Ordena da esquerda para a direita (Colunas/Alternativas)
                         linha = sorted(linha, key=lambda b: cv2.boundingRect(b)[0])
                         
                         marcada = None
@@ -292,7 +308,6 @@ with aba_corrigir:
                                 area_media = bw * bh
                                 
                         letras = ['A', 'B', 'C', 'D', 'E']
-                        # Só considera a questão marcada se tiver pelo menos 30% da área coberta de tinta
                         if marcada is not None and max_pixels > (area_media * 0.3):
                             respostas_lidas.append(letras[marcada])
                         else:
@@ -303,22 +318,27 @@ with aba_corrigir:
                             acertos += 1
                             
                     nota_calculada = (acertos / total_questoes) * 10.0
-                    st.success("✅ Avaliação Óptica finalizada com sucesso!")
+                    
+                    # Salva TUDO no dicionário
+                    st.session_state.resultado_analise = {
+                        'prova_id': prova_id_detectada,
+                        'gabarito_oficial': gabarito_oficial,
+                        'respostas_lidas': respostas_lidas,
+                        'nota': nota_calculada,
+                        'acertos': acertos,
+                        'total_questoes': total_questoes
+                    }
+                    st.session_state.imagem_processada = foto_prova.file_id
+                    
+                    status.update(label="Correção Óptica Finalizada!", state="complete", expanded=False)
                 else:
-                    st.warning(f"⚠️ A câmera não identificou as {bolinhas_esperadas} marcações perfeitamente. Achou apenas {len(bolinhas_validas)}. Tente melhorar a luz ou o enquadramento.")
+                    # Se falhar aqui, avisa no status o erro de forma nítida
+                    status.update(label="Erro no enquadramento do gabarito", state="error", expanded=True)
+                    st.error("❌ A câmera não identificou o quadro do gabarito perfeitamente. Certifique-se de que não há reflexos e toda a caixa de respostas está na foto.")
+            else:
+                status.update(label="Nenhuma questão encontrada no QR Code", state="error", expanded=True)
 
-            # Salva TUDO no dicionário da sessão para a tela não apagar
-            st.session_state.resultado_analise = {
-                'prova_id': prova_id_detectada,
-                'gabarito_oficial': gabarito_oficial,
-                'respostas_lidas': respostas_lidas,
-                'nota': nota_calculada,
-                'acertos': acertos,
-                'total_questoes': total_questoes
-            }
-            st.session_state.imagem_processada = foto_prova.file_id
-
-    # 4. Renderiza o resultado cruzado de forma estática (Baseado na memória)
+    # 5. Renderiza o resultado cruzado de forma estática (Baseado na memória)
     resultado = st.session_state.resultado_analise
     if resultado is not None and resultado['total_questoes'] > 0:
         
@@ -326,7 +346,6 @@ with aba_corrigir:
         st.subheader("🔍 Raio-X da Correção Automática")
         st.write(f"**ID da Prova:** `{resultado['prova_id']}`")
         
-        # Cria a tabela comparativa usando Pandas
         df_resultado = pd.DataFrame({
             "Questão": [f"{i+1}" for i in range(resultado['total_questoes'])],
             "Gabarito Oficial": resultado['gabarito_oficial'],
@@ -353,7 +372,6 @@ with aba_corrigir:
                 conn.commit()
                 conn.close()
                 
-                # Zera a memória e aciona a flag de sucesso para a próxima rodada
                 st.session_state.imagem_processada = None
                 st.session_state.resultado_analise = None
                 st.session_state.sucesso_salvamento = True
