@@ -37,7 +37,6 @@ def gerar_pdf(titulo, questoes, quantidade):
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     
-    # Prepara a string do gabarito para injetar no QR Code (Ex: Q1-A; Q2-C...)
     multiplas = [q for q in questoes if q['tipo'] == 'Múltipla Escolha']
     string_gabarito = ""
     if multiplas:
@@ -51,8 +50,6 @@ def gerar_pdf(titulo, questoes, quantidade):
             pdf.add_page()
             prova_id = str(uuid.uuid4())[:8].upper()
             
-            # 1. Dados injetados no QR Code (ID | GABARITO)
-            # O separador '|' ajuda a extrair facilmente depois
             dados_qr = f"{prova_id}|{string_gabarito}" if string_gabarito else prova_id
             
             qr_path = os.path.join(tmpdir, f"qr_{i}.png")
@@ -80,7 +77,7 @@ def gerar_pdf(titulo, questoes, quantidade):
             y_fim_gabarito = y_ancora
             
             if multiplas:
-                altura_gab = 10 + (6 * len(multiplas)) # Aumentei um pouco o espaçamento para caber as bolinhas
+                altura_gab = 10 + (6 * len(multiplas))
                 pdf.rect(105, y_ancora, 65, altura_gab) 
                 
                 pdf.set_xy(105, y_ancora + 1)
@@ -94,10 +91,8 @@ def gerar_pdf(titulo, questoes, quantidade):
                     pdf.set_xy(107, y_gab)
                     pdf.cell(6, 5, f"{idx_q+1}.", ln=0)
                     
-                    # Desenha bolinhas circulares para simular concurso
                     letras = ['A', 'B', 'C', 'D', 'E']
                     for alt in letras:
-                        # Usamos a letra O maiúscula com fonte um pouco maior para simular a bolinha em branco
                         pdf.set_font("Arial", "", 10)
                         pdf.cell(10, 5, "O", ln=0)
                     y_gab += 6
@@ -200,7 +195,8 @@ with aba_gerar:
 with aba_corrigir:
     st.write("Tire uma foto nítida e bem iluminada do cabeçalho da prova.")
     
-    foto_prova = st.camera_input("📷 Escanear Folha")
+    # Parâmetro facing_mode="environment" força o celular a abrir a lente traseira
+    foto_prova = st.camera_input("📷 Escanear Folha", facing_mode="environment")
     
     if foto_prova is not None:
         bytes_data = foto_prova.getvalue()
@@ -215,14 +211,11 @@ with aba_corrigir:
         conteudo_qr, _, _ = detector_qr.detectAndDecode(cinza)
         
         if conteudo_qr:
-            # 1. Separar o ID da Prova e a String do Gabarito gravados no QR Code
             try:
-                # Exemplo esperado no QR: "24C1A8B2|Q1-A; Q2-E; Q3-C"
                 if "|" in conteudo_qr:
                     prova_id, string_gabarito = conteudo_qr.split("|")
                     st.success(f"✅ Prova: **{prova_id}** | Chave Offline extraída com sucesso!")
                     
-                    # Converte a string "Q1-A; Q2-E" de volta para uma lista oficial ['A', 'E', 'C']
                     gabarito_oficial = []
                     partes = string_gabarito.split(";")
                     for p in partes:
@@ -243,14 +236,12 @@ with aba_corrigir:
             if gabarito_oficial:
                 total_questoes = len(gabarito_oficial)
                 
-                # 2. Filtrar os contornos que têm formato de bolinha
                 contornos, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 bolinhas_validas = []
                 
                 for c in contornos:
                     (x, y, w, h) = cv2.boundingRect(c)
                     proporcao = w / float(h)
-                    # Tolerância para o formato da nova bolinha circular ("O")
                     if 0.7 <= proporcao <= 1.3 and 10 <= w <= 60:
                         bolinhas_validas.append(c)
                 
@@ -283,7 +274,6 @@ with aba_corrigir:
                         if marcada is not None:
                             respostas_lidas.append(letras[marcada])
                             
-                    # 3. Comparação Final Offline (Direto do QR Code)
                     for lida, oficial in zip(respostas_lidas, gabarito_oficial):
                         if lida == oficial:
                             acertos += 1
@@ -293,7 +283,6 @@ with aba_corrigir:
                 else:
                     st.warning(f"⚠️ Máquina encontrou irregularidade. Bolinhas detectadas: {len(bolinhas_validas)}. Aproxime o celular da caixa de respostas.")
             
-            # Painel de Inserção de Dados
             with st.form("form_salvar_nota", clear_on_submit=True):
                 st.subheader("Registrar no Sistema")
                 col_n, col_m, col_v = st.columns([2, 1, 1])
