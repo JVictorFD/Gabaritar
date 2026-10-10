@@ -193,12 +193,14 @@ with aba_gerar:
 # ABA 2: MÓDULO DE ESCANEAMENTO (OMR INTELIGENTE)
 # ==========================================
 with aba_corrigir:
-    st.write("Tire uma foto nítida e bem iluminada do cabeçalho da prova.")
+    st.write("Tire uma foto nítida do cabeçalho da prova para corrigir.")
     
-    # Parâmetro facing_mode removido para evitar o TypeError do Streamlit
-    foto_prova = st.camera_input("📷 Escanear Folha")
+    # Substituição do componente de câmera direta pelo File Uploader
+    # Em dispositivos móveis, isso invoca o App nativo de câmera com a lente principal correta.
+    foto_prova = st.file_uploader("📷 Tirar Foto (Usa a Câmera Nativa do Celular)", type=['png', 'jpg', 'jpeg'])
     
     if foto_prova is not None:
+        # A leitura dos bytes continua exatamente igual, processando a foto do uploader instantaneamente
         bytes_data = foto_prova.getvalue()
         array_np = np.frombuffer(bytes_data, np.uint8)
         img_cv2 = cv2.imdecode(array_np, cv2.IMREAD_COLOR)
