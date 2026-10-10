@@ -7,17 +7,13 @@ from fpdf import FPDF
 import cv2
 import numpy as np
 import sqlite3
-import json
 
 st.set_page_config(page_title="Gabaritar - Sistema OMR", page_icon="📝", layout="wide")
 
 # --- BANCO DE DADOS LOCAL ---
 def inicializar_banco():
-    """Cria tabelas para salvar as correções e os gabaritos oficiais gerados."""
     conn = sqlite3.connect('notas_alunos.db')
     cursor = conn.cursor()
-    
-    # Tabela do histórico de alunos e notas
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS correcoes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -28,15 +24,6 @@ def inicializar_banco():
             data_hora TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    
-    # Tabela para guardar as respostas corretas vinculadas a cada QR Code
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS gabaritos (
-            prova_id TEXT PRIMARY KEY,
-            respostas TEXT
-        )
-    ''')
-    
     conn.commit()
     conn.close()
 
@@ -50,25 +37,27 @@ def gerar_pdf(titulo, questoes, quantidade):
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     
-    # Extrai o gabarito oficial das questões configuradas pelo professor
-    respostas_oficiais = [q['correta'] for q in questoes if q['tipo'] == 'Múltipla Escolha']
+    # Prepara a string do gabarito para injetar no QR Code (Ex: Q1-A; Q2-C...)
+    multiplas = [q for q in questoes if q['tipo'] == 'Múltipla Escolha']
+    string_gabarito = ""
+    if multiplas:
+        lista_respostas = []
+        for idx, q in enumerate(multiplas):
+            lista_respostas.append(f"Q{idx+1}-{q['correta']}")
+        string_gabarito = "; ".join(lista_respostas)
     
     with tempfile.TemporaryDirectory() as tmpdir:
         for i in range(quantidade):
             pdf.add_page()
             prova_id = str(uuid.uuid4())[:8].upper()
             
-            # Salva o gabarito oficial deste ID específico no Banco de Dados
-            conn = sqlite3.connect('notas_alunos.db')
-            c = conn.cursor()
-            c.execute("INSERT OR REPLACE INTO gabaritos (prova_id, respostas) VALUES (?, ?)", 
-                      (prova_id, json.dumps(respostas_oficiais)))
-            conn.commit()
-            conn.close()
+            # 1. Dados injetados no QR Code (ID | GABARITO)
+            # O separador '|' ajuda a extrair facilmente depois
+            dados_qr = f"{prova_id}|{string_gabarito}" if string_gabarito else prova_id
             
             qr_path = os.path.join(tmpdir, f"qr_{i}.png")
             qr = qrcode.QRCode(version=1, box_size=5, border=1)
-            qr.add_data(prova_id)
+            qr.add_data(dados_qr)
             qr.make(fit=True)
             img = qr.make_image(fill_color="black", back_color="white")
             img.save(qr_path)
@@ -88,27 +77,30 @@ def gerar_pdf(titulo, questoes, quantidade):
             pdf.cell(90, 7, higienizar_texto(f"ID Exclusivo da Prova: {prova_id}"), ln=1)
             y_fim_aluno = pdf.get_y()
             
-            multiplas = [q for q in questoes if q['tipo'] == 'Múltipla Escolha']
             y_fim_gabarito = y_ancora
             
             if multiplas:
-                altura_gab = 10 + (5 * len(multiplas))
-                pdf.rect(105, y_ancora, 60, altura_gab) 
+                altura_gab = 10 + (6 * len(multiplas)) # Aumentei um pouco o espaçamento para caber as bolinhas
+                pdf.rect(105, y_ancora, 65, altura_gab) 
                 
                 pdf.set_xy(105, y_ancora + 1)
                 pdf.set_font("Arial", "B", 9)
-                pdf.cell(60, 5, higienizar_texto("GABARITO"), ln=1, align="C")
+                pdf.cell(65, 5, higienizar_texto("GABARITO"), ln=1, align="C")
                 
                 y_gab = y_ancora + 8
-                pdf.set_font("Arial", "", 8)
                 
-                for idx_q, q in enumerate(questoes):
-                    if q['tipo'] == 'Múltipla Escolha':
-                        pdf.set_xy(107, y_gab)
-                        pdf.cell(6, 4, f"{idx_q+1}.", ln=0)
-                        for alt in ['A', 'B', 'C', 'D', 'E']:
-                            pdf.cell(9, 4, f"({alt})", ln=0)
-                        y_gab += 5
+                for idx_q, q in enumerate(multiplas):
+                    pdf.set_font("Arial", "", 8)
+                    pdf.set_xy(107, y_gab)
+                    pdf.cell(6, 5, f"{idx_q+1}.", ln=0)
+                    
+                    # Desenha bolinhas circulares para simular concurso
+                    letras = ['A', 'B', 'C', 'D', 'E']
+                    for alt in letras:
+                        # Usamos a letra O maiúscula com fonte um pouco maior para simular a bolinha em branco
+                        pdf.set_font("Arial", "", 10)
+                        pdf.cell(10, 5, "O", ln=0)
+                    y_gab += 6
                 
                 y_fim_gabarito = y_ancora + altura_gab
             
@@ -197,7 +189,7 @@ with aba_gerar:
 
     if st.button("🚀 Gerar Lote em PDF", type="primary", use_container_width=True):
         if len(st.session_state.questoes) > 0:
-            with st.spinner("Vinculando gabaritos no Banco de Dados e gerando PDF..."):
+            with st.spinner("Embutindo chaves no QR Code e gerando PDF..."):
                 pdf_bytes = gerar_pdf(titulo_prova, st.session_state.questoes, qtd_provas)
                 st.success("Lote gerado com sucesso!")
                 st.download_button("📥 Baixar PDF Pronto para Impressão", data=pdf_bytes, file_name="Provas.pdf", mime="application/pdf")
@@ -220,22 +212,35 @@ with aba_corrigir:
         _, thresh = cv2.threshold(suavizada, 128, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
         
         detector_qr = cv2.QRCodeDetector()
-        prova_id, _, _ = detector_qr.detectAndDecode(cinza)
+        conteudo_qr, _, _ = detector_qr.detectAndDecode(cinza)
         
-        if prova_id:
-            st.success(f"✅ QR Code Detectado! ID: **{prova_id}**")
-            
-            # 1. Recuperar o Gabarito Oficial do Banco de Dados
-            conn = sqlite3.connect('notas_alunos.db')
-            c = conn.cursor()
-            c.execute("SELECT respostas FROM gabaritos WHERE prova_id = ?", (prova_id,))
-            resultado_bd = c.fetchone()
-            conn.close()
-            
+        if conteudo_qr:
+            # 1. Separar o ID da Prova e a String do Gabarito gravados no QR Code
+            try:
+                # Exemplo esperado no QR: "24C1A8B2|Q1-A; Q2-E; Q3-C"
+                if "|" in conteudo_qr:
+                    prova_id, string_gabarito = conteudo_qr.split("|")
+                    st.success(f"✅ Prova: **{prova_id}** | Chave Offline extraída com sucesso!")
+                    
+                    # Converte a string "Q1-A; Q2-E" de volta para uma lista oficial ['A', 'E', 'C']
+                    gabarito_oficial = []
+                    partes = string_gabarito.split(";")
+                    for p in partes:
+                        if "-" in p:
+                            _, resposta = p.split("-")
+                            gabarito_oficial.append(resposta.strip())
+                else:
+                    prova_id = conteudo_qr
+                    gabarito_oficial = []
+                    st.warning(f"⚠️ Prova lida (ID: {prova_id}), mas nenhum gabarito estava atrelado ao QR Code.")
+            except Exception as e:
+                st.error("Erro ao decodificar chave do QR Code.")
+                prova_id = "DESCONHECIDO"
+                gabarito_oficial = []
+
             nota_calculada = 0.0
             
-            if resultado_bd:
-                gabarito_oficial = json.loads(resultado_bd[0])
+            if gabarito_oficial:
                 total_questoes = len(gabarito_oficial)
                 
                 # 2. Filtrar os contornos que têm formato de bolinha
@@ -245,29 +250,25 @@ with aba_corrigir:
                 for c in contornos:
                     (x, y, w, h) = cv2.boundingRect(c)
                     proporcao = w / float(h)
-                    if 0.8 <= proporcao <= 1.2 and 10 <= w <= 60:
+                    # Tolerância para o formato da nova bolinha circular ("O")
+                    if 0.7 <= proporcao <= 1.3 and 10 <= w <= 60:
                         bolinhas_validas.append(c)
                 
-                # A máquina precisa enxergar exatamente a matriz completa (Questões x 5 opções)
                 bolinhas_esperadas = total_questoes * 5
                 
-                if len(bolinhas_validas) == bolinhas_esperadas and total_questoes > 0:
-                    # Ordena todas as bolinhas de cima para baixo (eixo Y)
+                if len(bolinhas_validas) >= bolinhas_esperadas and total_questoes > 0:
                     bolinhas_validas = sorted(bolinhas_validas, key=lambda b: cv2.boundingRect(b)[1])
                     
                     respostas_lidas = []
                     acertos = 0
                     
-                    # Agrupa as bolinhas em linhas (5 opções por questão)
-                    for i in range(0, len(bolinhas_validas), 5):
+                    for i in range(0, min(len(bolinhas_validas), bolinhas_esperadas), 5):
                         linha = bolinhas_validas[i:i+5]
-                        # Ordena a linha da esquerda para a direita (eixo X)
                         linha = sorted(linha, key=lambda b: cv2.boundingRect(b)[0])
                         
                         marcada = None
                         max_pixels = 0
                         
-                        # Verifica qual bolinha tem mais tinta escura (pixels brancos na máscara invertida)
                         for j, bolinha in enumerate(linha):
                             mask = np.zeros(thresh.shape, dtype="uint8")
                             cv2.drawContours(mask, [bolinha], -1, 255, -1)
@@ -282,17 +283,15 @@ with aba_corrigir:
                         if marcada is not None:
                             respostas_lidas.append(letras[marcada])
                             
-                    # 3. Comparação Final e Cálculo da Nota
+                    # 3. Comparação Final Offline (Direto do QR Code)
                     for lida, oficial in zip(respostas_lidas, gabarito_oficial):
                         if lida == oficial:
                             acertos += 1
                             
                     nota_calculada = (acertos / total_questoes) * 10.0
-                    st.info(f"🎯 **Análise Concluída:** {acertos} acertos de {total_questoes} questões.")
+                    st.info(f"🎯 **Correção Offline Concluída:** {acertos} acertos de {total_questoes} questões.")
                 else:
-                    st.warning(f"⚠️ A câmera detectou {len(bolinhas_validas)} marcações redondas, mas eram esperadas {bolinhas_esperadas}. Aproxime o celular para focar apenas no quadro do gabarito sem sombras fortes.")
-            else:
-                st.error("❌ Gabarito não encontrado para este ID. Certifique-se de que a prova foi gerada neste dispositivo.")
+                    st.warning(f"⚠️ Máquina encontrou irregularidade. Bolinhas detectadas: {len(bolinhas_validas)}. Aproxime o celular da caixa de respostas.")
             
             # Painel de Inserção de Dados
             with st.form("form_salvar_nota", clear_on_submit=True):
