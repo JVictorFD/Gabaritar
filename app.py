@@ -195,122 +195,138 @@ with aba_gerar:
 with aba_corrigir:
     st.write("Tire uma foto nítida do cabeçalho da prova para corrigir.")
     
-    # Substituição do componente de câmera direta pelo File Uploader
-    # Em dispositivos móveis, isso invoca o App nativo de câmera com a lente principal correta.
+    # 1. Protegemos os dados da tela usando Session State
+    if 'imagem_processada' not in st.session_state:
+        st.session_state.imagem_processada = None
+    if 'nota_calculada' not in st.session_state:
+        st.session_state.nota_calculada = None
+    if 'prova_id_atual' not in st.session_state:
+        st.session_state.prova_id_atual = None
+        
     foto_prova = st.file_uploader("📷 Tirar Foto (Usa a Câmera Nativa do Celular)", type=['png', 'jpg', 'jpeg'])
     
-    if foto_prova is not None:
-        # A leitura dos bytes continua exatamente igual, processando a foto do uploader instantaneamente
-        bytes_data = foto_prova.getvalue()
-        array_np = np.frombuffer(bytes_data, np.uint8)
-        img_cv2 = cv2.imdecode(array_np, cv2.IMREAD_COLOR)
-        
-        cinza = cv2.cvtColor(img_cv2, cv2.COLOR_BGR2GRAY)
-        suavizada = cv2.GaussianBlur(cinza, (5, 5), 0)
-        _, thresh = cv2.threshold(suavizada, 128, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
-        
-        detector_qr = cv2.QRCodeDetector()
-        conteudo_qr, _, _ = detector_qr.detectAndDecode(cinza)
-        
-        if conteudo_qr:
-            try:
-                if "|" in conteudo_qr:
-                    prova_id, string_gabarito = conteudo_qr.split("|")
-                    st.success(f"✅ Prova: **{prova_id}** | Chave Offline extraída com sucesso!")
-                    
-                    gabarito_oficial = []
-                    partes = string_gabarito.split(";")
-                    for p in partes:
-                        if "-" in p:
-                            _, resposta = p.split("-")
-                            gabarito_oficial.append(resposta.strip())
-                else:
-                    prova_id = conteudo_qr
-                    gabarito_oficial = []
-                    st.warning(f"⚠️ Prova lida (ID: {prova_id}), mas nenhum gabarito estava atrelado ao QR Code.")
-            except Exception as e:
-                st.error("Erro ao decodificar chave do QR Code.")
-                prova_id = "DESCONHECIDO"
-                gabarito_oficial = []
-
-            nota_calculada = 0.0
+    # Se o professor enviou uma foto AGORA, nós processamos e salvamos no cofre da sessão
+    if foto_prova is not None and st.session_state.imagem_processada != foto_prova.file_id:
+        with st.spinner("Analisando Gabarito..."):
+            bytes_data = foto_prova.getvalue()
+            array_np = np.frombuffer(bytes_data, np.uint8)
+            img_cv2 = cv2.imdecode(array_np, cv2.IMREAD_COLOR)
             
-            if gabarito_oficial:
-                total_questoes = len(gabarito_oficial)
-                
-                contornos, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                bolinhas_validas = []
-                
-                for c in contornos:
-                    (x, y, w, h) = cv2.boundingRect(c)
-                    proporcao = w / float(h)
-                    if 0.7 <= proporcao <= 1.3 and 10 <= w <= 60:
-                        bolinhas_validas.append(c)
-                
-                bolinhas_esperadas = total_questoes * 5
-                
-                if len(bolinhas_validas) >= bolinhas_esperadas and total_questoes > 0:
-                    bolinhas_validas = sorted(bolinhas_validas, key=lambda b: cv2.boundingRect(b)[1])
-                    
-                    respostas_lidas = []
-                    acertos = 0
-                    
-                    for i in range(0, min(len(bolinhas_validas), bolinhas_esperadas), 5):
-                        linha = bolinhas_validas[i:i+5]
-                        linha = sorted(linha, key=lambda b: cv2.boundingRect(b)[0])
-                        
-                        marcada = None
-                        max_pixels = 0
-                        
-                        for j, bolinha in enumerate(linha):
-                            mask = np.zeros(thresh.shape, dtype="uint8")
-                            cv2.drawContours(mask, [bolinha], -1, 255, -1)
-                            mask = cv2.bitwise_and(thresh, thresh, mask=mask)
-                            total_pixels = cv2.countNonZero(mask)
-                            
-                            if total_pixels > max_pixels:
-                                max_pixels = total_pixels
-                                marcada = j
-                                
-                        letras = ['A', 'B', 'C', 'D', 'E']
-                        if marcada is not None:
-                            respostas_lidas.append(letras[marcada])
-                            
-                    for lida, oficial in zip(respostas_lidas, gabarito_oficial):
-                        if lida == oficial:
-                            acertos += 1
-                            
-                    nota_calculada = (acertos / total_questoes) * 10.0
-                    st.info(f"🎯 **Correção Offline Concluída:** {acertos} acertos de {total_questoes} questões.")
-                else:
-                    st.warning(f"⚠️ Máquina encontrou irregularidade. Bolinhas detectadas: {len(bolinhas_validas)}. Aproxime o celular da caixa de respostas.")
+            cinza = cv2.cvtColor(img_cv2, cv2.COLOR_BGR2GRAY)
+            suavizada = cv2.GaussianBlur(cinza, (5, 5), 0)
+            _, thresh = cv2.threshold(suavizada, 128, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
             
-            with st.form("form_salvar_nota", clear_on_submit=True):
-                st.subheader("Registrar no Sistema")
-                col_n, col_m, col_v = st.columns([2, 1, 1])
-                
-                with col_n:
-                    nome_aluno = st.text_input("Nome do Aluno")
-                with col_m:
-                    matricula_aluno = st.text_input("Matrícula")
-                with col_v:
-                    st.metric(label="Nota Final", value=f"{nota_calculada:.1f}")
-                
-                submit = st.form_submit_button("Salvar no Banco de Dados 💾", type="primary")
-                
-                if submit:
-                    if nome_aluno:
-                        conn = sqlite3.connect('notas_alunos.db')
-                        c = conn.cursor()
-                        c.execute("INSERT INTO correcoes (prova_id, nome_aluno, matricula, nota) VALUES (?, ?, ?, ?)", 
-                                  (prova_id, nome_aluno, matricula_aluno, nota_calculada))
-                        conn.commit()
-                        conn.close()
-                        st.success(f"Nota de {nome_aluno} salva com sucesso! Pode escanear a próxima.")
+            detector_qr = cv2.QRCodeDetector()
+            conteudo_qr, _, _ = detector_qr.detectAndDecode(cinza)
+            
+            st.session_state.prova_id_atual = "DESCONHECIDO"
+            st.session_state.nota_calculada = 0.0
+            gabarito_oficial = []
+            
+            if conteudo_qr:
+                try:
+                    if "|" in conteudo_qr:
+                        prova_id, string_gabarito = conteudo_qr.split("|")
+                        st.session_state.prova_id_atual = prova_id
+                        st.success(f"✅ Prova: **{prova_id}** | Chave Offline extraída com sucesso!")
+                        
+                        partes = string_gabarito.split(";")
+                        for p in partes:
+                            if "-" in p:
+                                _, resposta = p.split("-")
+                                gabarito_oficial.append(resposta.strip())
                     else:
-                        st.error("Digite o nome do aluno antes de salvar.")
-        else:
-            st.error("❌ Não foi possível ler o QR Code. Fique em um local bem iluminado e alinhe a câmera.")
+                        st.session_state.prova_id_atual = conteudo_qr
+                        st.warning(f"⚠️ Prova lida (ID: {st.session_state.prova_id_atual}), mas nenhum gabarito estava atrelado ao QR Code.")
+                except Exception as e:
+                    st.error("Erro ao decodificar chave do QR Code.")
+
+                if gabarito_oficial:
+                    total_questoes = len(gabarito_oficial)
+                    
+                    contornos, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    bolinhas_validas = []
+                    
+                    for c in contornos:
+                        (x, y, w, h) = cv2.boundingRect(c)
+                        proporcao = w / float(h)
+                        if 0.7 <= proporcao <= 1.3 and 10 <= w <= 60:
+                            bolinhas_validas.append(c)
+                    
+                    bolinhas_esperadas = total_questoes * 5
+                    
+                    if len(bolinhas_validas) >= bolinhas_esperadas and total_questoes > 0:
+                        bolinhas_validas = sorted(bolinhas_validas, key=lambda b: cv2.boundingRect(b)[1])
+                        
+                        respostas_lidas = []
+                        acertos = 0
+                        
+                        for i in range(0, min(len(bolinhas_validas), bolinhas_esperadas), 5):
+                            linha = bolinhas_validas[i:i+5]
+                            linha = sorted(linha, key=lambda b: cv2.boundingRect(b)[0])
+                            
+                            marcada = None
+                            max_pixels = 0
+                            
+                            for j, bolinha in enumerate(linha):
+                                mask = np.zeros(thresh.shape, dtype="uint8")
+                                cv2.drawContours(mask, [bolinha], -1, 255, -1)
+                                mask = cv2.bitwise_and(thresh, thresh, mask=mask)
+                                total_pixels = cv2.countNonZero(mask)
+                                
+                                if total_pixels > max_pixels:
+                                    max_pixels = total_pixels
+                                    marcada = j
+                                    
+                            letras = ['A', 'B', 'C', 'D', 'E']
+                            if marcada is not None:
+                                respostas_lidas.append(letras[marcada])
+                                
+                        for lida, oficial in zip(respostas_lidas, gabarito_oficial):
+                            if lida == oficial:
+                                acertos += 1
+                                
+                        st.session_state.nota_calculada = (acertos / total_questoes) * 10.0
+                        st.info(f"🎯 **Correção Offline Concluída:** {acertos} acertos de {total_questoes} questões.")
+                    else:
+                        st.warning(f"⚠️ Máquina encontrou irregularidade. Bolinhas detectadas: {len(bolinhas_validas)}. Aproxime o celular da caixa de respostas.")
+            else:
+                st.error("❌ Não foi possível ler o QR Code. Fique em um local bem iluminado e alinhe a câmera.")
+                
+            # Salva o arquivo atual na sessão para não re-processar na próxima vez que a tela piscar
+            st.session_state.imagem_processada = foto_prova.file_id
+
+    # 2. Exibe o formulário de nota apenas se nós conseguimos concluir uma análise
+    if st.session_state.nota_calculada is not None:
+        with st.form("form_salvar_nota", clear_on_submit=True):
+            st.subheader("Registrar no Sistema")
+            col_n, col_m, col_v = st.columns([2, 1, 1])
+            
+            with col_n:
+                nome_aluno = st.text_input("Nome do Aluno")
+            with col_m:
+                matricula_aluno = st.text_input("Matrícula")
+            with col_v:
+                st.metric(label="Nota Final", value=f"{st.session_state.nota_calculada:.1f}")
+            
+            submit = st.form_submit_button("Salvar no Banco de Dados 💾", type="primary")
+            
+            if submit:
+                if nome_aluno:
+                    conn = sqlite3.connect('notas_alunos.db')
+                    c = conn.cursor()
+                    c.execute("INSERT INTO correcoes (prova_id, nome_aluno, matricula, nota) VALUES (?, ?, ?, ?)", 
+                              (st.session_state.prova_id_atual, nome_aluno, matricula_aluno, st.session_state.nota_calculada))
+                    conn.commit()
+                    conn.close()
+                    st.success(f"Nota de {nome_aluno} salva com sucesso! O sistema foi zerado. Tire a foto da próxima prova.")
+                    
+                    # Limpa a memória para aceitar a próxima folha
+                    st.session_state.imagem_processada = None
+                    st.session_state.nota_calculada = None
+                    st.session_state.prova_id_atual = None
+                else:
+                    st.error("Digite o nome do aluno antes de salvar.")
 
 # ==========================================
 # ABA 3: RELATÓRIOS E EXPORTAÇÃO
