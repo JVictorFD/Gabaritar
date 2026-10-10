@@ -1,0 +1,6 @@
+{
+    "python.analysis.extraPaths": [
+        "c:\\Users\\i7 9 ddr4\\.vscode\\extensions\\benpaddlejones.pico-bridge-2.3.46\\emulator\\mock\\typings",
+        "c:\\Users\\i7 9 ddr4\\.vscode\\extensions\\benpaddlejones.pico-bridge-2.3.46\\emulator\\mock\\micropython"
+    ]
+}
