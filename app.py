@@ -232,24 +232,31 @@ with aba_corrigir:
         
         with st.status("Iniciando escaneamento da prova...", expanded=True) as status:
             passo_sucesso = True
-            st.write("🔄 Tratando formato da imagem...")
+            st.write("🔄 Tratando formato e peso da imagem do celular...")
             
             try:
+                # O grande ajuste do Resize First imune a Memory Leaks em mobile:
+                # Limita diretamente a imagem no carregamento via buffer de memória antes de entregar pro OpenCV
                 imagem_pil = Image.open(io.BytesIO(foto_prova.getvalue()))
                 imagem_pil = ImageOps.exif_transpose(imagem_pil)
+                
+                # Se a imagem tiver uma resolução gigantesca, ela é comprimida na marra
+                MAX_SIZE = (1280, 1280)
+                imagem_pil.thumbnail(MAX_SIZE, Image.Resampling.LANCZOS)
+                
                 array_pil = np.array(imagem_pil)
                 if array_pil.shape[2] == 4: 
                     array_pil = cv2.cvtColor(array_pil, cv2.COLOR_RGBA2RGB)
                 img_cv2_orig = cv2.cvtColor(array_pil, cv2.COLOR_RGB2BGR)
-                st.write("📸 Imagem carregada na memória com sucesso.")
+                st.write("📸 Imagem otimizada e carregada na memória com sucesso.")
             except Exception as e:
                 status.update(label="Falha ao decodificar a foto", state="error", expanded=True)
-                st.error(f"❌ Erro ao decodificar a foto: {e}")
+                st.error(f"❌ Erro ao decodificar a foto do celular: {e}")
                 passo_sucesso = False
             
             prova_id_detectada = "DESCONHECIDO"
             gabarito_oficial = []
-            codigo_qr_lido = None
+            qr_rect = None
             
             if passo_sucesso:
                 st.write("🔍 Extraindo informações do QR Code...")
@@ -257,8 +264,9 @@ with aba_corrigir:
                 conteudo_qr = None
                 
                 if codigos_lidos:
-                    codigo_qr_lido = codigos_lidos[0]
-                    conteudo_qr = codigo_qr_lido.data.decode("utf-8")
+                    codigo = codigos_lidos[0]
+                    conteudo_qr = codigo.data.decode("utf-8")
+                    qr_rect = codigo.rect
                 
                 if conteudo_qr:
                     if "|" in conteudo_qr:
@@ -278,17 +286,14 @@ with aba_corrigir:
                     passo_sucesso = False
             
             if passo_sucesso and gabarito_oficial:
-                # O segredo: Em vez de caçar a caixa cortada, usamos o QR Code como âncora mestre
                 st.write("📐 Ancorando grade matemática pelo QR Code...")
                 
                 cinza = cv2.cvtColor(img_cv2_orig, cv2.COLOR_BGR2GRAY)
                 suavizada = cv2.GaussianBlur(cinza, (5, 5), 0)
-                # Inverte: Tinta fica branca (255) e Papel fica preto (0)
                 _, thresh = cv2.threshold(suavizada, 128, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
 
                 N_questoes = len(gabarito_oficial)
                 
-                # Extrai os 4 cantos do QR Code perfeitamente
                 if len(codigo_qr_lido.polygon) == 4:
                     pts = np.array([[p.x, p.y] for p in codigo_qr_lido.polygon], dtype="float32")
                 else:
@@ -302,20 +307,17 @@ with aba_corrigir:
                 
                 pts = ordenar_pontos(pts)
                 
-                # Coordenadas matemáticas fixas do QR Code em nosso "Canvas" virtual (10 pixels = 1 mm)
                 pts_dst = np.array([
-                    [709, 9],    # Top-Left
-                    [941, 9],    # Top-Right
-                    [941, 241],  # Bottom-Right
-                    [709, 241]   # Bottom-Left
+                    [709, 9],
+                    [941, 9],
+                    [941, 241],
+                    [709, 241]
                 ], dtype="float32")
                 
                 matriz = cv2.getPerspectiveTransform(pts, pts_dst)
                 
-                # Achata e estica toda a imagem baseada na proporção do QR Code
                 target_w = 1000
                 target_h = max(300, 150 + N_questoes * 60)
-                # INTER_NEAREST garante que os pixels continuem estritamente brancos ou pretos, sem borrões no redimensionamento
                 gabarito_warped = cv2.warpPerspective(thresh, matriz, (target_w, target_h), flags=cv2.INTER_NEAREST)
                 
                 st.write("📝 Avaliando densidade de tinta por célula estatística...")
@@ -324,13 +326,11 @@ with aba_corrigir:
                 letras = ['A', 'B', 'C', 'D', 'E']
                 
                 for i in range(N_questoes):
-                    # Como mapeamos a partir do QR Code, a linha Y e a coluna X são imutáveis
                     y_centro = 105 + i * 60
                     densidades = []
                     
                     for j in range(5):
                         x_centro = 130 + j * 100
-                        # Recorta o miolo exato (60x40 pixels) onde a bolinha tem que estar
                         cell_roi = gabarito_warped[max(0, y_centro - 20) : y_centro + 20, max(0, x_centro - 30) : x_centro + 30]
                         
                         if cell_roi.size > 0:
@@ -342,9 +342,6 @@ with aba_corrigir:
                     media_linha = np.mean(densidades)
                     max_densidade = max(densidades)
                     
-                    # REGRA DE OURO: Para ser considerada marcada, a bolinha tem que ser muito mais preta
-                    # que as outras (pelo menos 1.5x a média da linha inteira) E ter volume real de tinta (> 200).
-                    # Uma bolinha vazia "O" nunca passará no teste se as outras também estiverem vazias.
                     if max_densidade > (media_linha * 1.5) and max_densidade > 200: 
                         idx_marcada = densidades.index(max_densidade)
                         respostas_lidas.append(letras[idx_marcada])
