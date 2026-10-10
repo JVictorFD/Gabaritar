@@ -16,6 +16,18 @@ from pyzbar.pyzbar import decode
 
 st.set_page_config(page_title="Gabaritar - Sistema OMR", page_icon="📝", layout="wide")
 
+# --- FUNÇÃO MATEMÁTICA PARA CORREÇÃO DE PERSPECTIVA ---
+def ordenar_pontos(pontos):
+    pontos = pontos.reshape((4, 2))
+    nova_ordem = np.zeros((4, 2), dtype=np.float32)
+    soma = pontos.sum(axis=1)
+    nova_ordem[0] = pontos[np.argmin(soma)]
+    nova_ordem[2] = pontos[np.argmax(soma)]
+    diff = np.diff(pontos, axis=1)
+    nova_ordem[1] = pontos[np.argmin(diff)]
+    nova_ordem[3] = pontos[np.argmax(diff)]
+    return nova_ordem
+
 # --- BANCO DE DADOS LOCAL ---
 def inicializar_banco():
     conn = sqlite3.connect('notas_alunos.db')
@@ -238,6 +250,7 @@ with aba_corrigir:
             
             prova_id_detectada = "DESCONHECIDO"
             gabarito_oficial = []
+            qr_rect = None
             
             if passo_sucesso:
                 st.write("🔍 Extraindo informações do QR Code...")
@@ -245,7 +258,9 @@ with aba_corrigir:
                 conteudo_qr = None
                 
                 if codigos_lidos:
-                    conteudo_qr = codigos_lidos[0].data.decode("utf-8")
+                    codigo = codigos_lidos[0]
+                    conteudo_qr = codigo.data.decode("utf-8")
+                    qr_rect = codigo.rect  # Retorna: left, top, width, height
                 
                 if conteudo_qr:
                     if "|" in conteudo_qr:
@@ -261,101 +276,120 @@ with aba_corrigir:
                         st.write(f"⚠️ Atenção: QR lido ({prova_id_detectada}), mas sem gabarito atrelado.")
                 else:
                     status.update(label="Falha na leitura do QR Code", state="error", expanded=True)
-                    st.error("❌ O sistema não encontrou o QR Code. Certifique-se de que a imagem contém o código de barras nítido.")
+                    st.error("❌ O sistema não encontrou o QR Code. Certifique-se de que a imagem contém o código nítido.")
                     passo_sucesso = False
             
-            if passo_sucesso:
-                st.write("⚙️ Analisando gabarito na imagem...")
-                alt_orig, larg_orig = img_cv2_orig.shape[:2]
-                nova_larg = 1000
-                prop = nova_larg / float(larg_orig)
-                nova_alt = int(alt_orig * prop)
-                img_cv2 = cv2.resize(img_cv2_orig, (nova_larg, nova_alt))
-                
-                cinza = cv2.cvtColor(img_cv2, cv2.COLOR_BGR2GRAY)
+            if passo_sucesso and gabarito_oficial:
+                st.write("📐 Alinhando grade matemática do Gabarito...")
+                cinza = cv2.cvtColor(img_cv2_orig, cv2.COLOR_BGR2GRAY)
                 suavizada = cv2.GaussianBlur(cinza, (5, 5), 0)
-                # Inverte a imagem: fundo fica preto, e as bolinhas e tinta ficam brancas (valor 255)
+                # Inverte a imagem: tudo que é tinta preta vira branco absoluto. O papel vira preto.
                 _, thresh = cv2.threshold(suavizada, 128, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
 
-                nota_calculada = 0.0
-                respostas_lidas = []
-                acertos = 0
-                total_questoes = len(gabarito_oficial)
+                N_questoes = len(gabarito_oficial)
+                # Dimensões matemáticas fixas para achatar a caixa do gabarito uniformemente
+                target_w = 650
+                target_h = 100 + 60 * N_questoes
                 
-                if total_questoes > 0:
-                    contornos, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                    bolinhas_validas = []
-                    
-                    for c in contornos:
-                        (x, y, w, h) = cv2.boundingRect(c)
-                        proporcao = w / float(h)
-                        # Ampliamos a flexibilidade para ler os "Ovais" gerados pela fonte Arial no PDF e prints
-                        if 0.5 <= proporcao <= 1.5 and 8 <= w <= 100:
-                            bolinhas_validas.append(c)
-                    
-                    bolinhas_esperadas = total_questoes * 5
-                    st.write(f"ℹ️ Encontradas {len(bolinhas_validas)} formas (Esperado: {bolinhas_esperadas}).")
-                    
-                    if len(bolinhas_validas) >= bolinhas_esperadas:
-                        st.write("📝 Processando densidade de tinta e calculando nota...")
-                        
-                        # Ordena de cima para baixo (Questões 1, 2, 3...)
-                        bolinhas_validas = sorted(bolinhas_validas, key=lambda b: cv2.boundingRect(b)[1])
-                        
-                        for i in range(0, min(len(bolinhas_validas), bolinhas_esperadas), 5):
-                            linha = bolinhas_validas[i:i+5]
-                            # Ordena da esquerda para a direita (Letras A, B, C, D, E)
-                            linha = sorted(linha, key=lambda b: cv2.boundingRect(b)[0])
-                            
-                            marcada = None
-                            densidade_maxima = 0
-                            
-                            # Avalia cada uma das 5 opções daquela questão
-                            for j, bolinha in enumerate(linha):
-                                x_b, y_b, w_b, h_b = cv2.boundingRect(bolinha)
-                                
-                                # Recorta exatamente o quadrado onde a bolinha está
-                                regiao_bolinha = thresh[y_b:y_b+h_b, x_b:x_b+w_b]
-                                
-                                # Conta quantos pixels de "tinta" existem ali dentro
-                                total_pixels_brancos = cv2.countNonZero(regiao_bolinha)
-                                area_total = w_b * h_b
-                                
-                                # Calcula a densidade (0.0 a 1.0)
-                                densidade = total_pixels_brancos / float(area_total)
-                                
-                                if densidade > densidade_maxima:
-                                    densidade_maxima = densidade
-                                    marcada = j
-                                    
-                            letras = ['A', 'B', 'C', 'D', 'E']
-                            # Apenas considera marcado se houver muita tinta preenchida (> 40% da área total)
-                            # Letras "O" vazias ficam em torno de 15% a 25% de densidade devido à borda fina
-                            if marcada is not None and densidade_maxima > 0.40:
-                                respostas_lidas.append(letras[marcada])
-                            else:
-                                respostas_lidas.append("Em Branco")
-                                
-                        for lida, oficial in zip(respostas_lidas, gabarito_oficial):
-                            if lida == oficial:
-                                acertos += 1
-                                
-                        nota_calculada = (acertos / total_questoes) * 10.0
-                        
-                        st.session_state.resultado_analise = {
-                            'prova_id': prova_id_detectada,
-                            'gabarito_oficial': gabarito_oficial,
-                            'respostas_lidas': respostas_lidas,
-                            'nota': nota_calculada,
-                            'acertos': acertos,
-                            'total_questoes': total_questoes
-                        }
-                        status.update(label="Correção Óptica Finalizada!", state="complete", expanded=False)
-                    else:
-                        status.update(label="Erro no enquadramento do gabarito", state="error", expanded=True)
-                        st.error(f"❌ O QR Code foi lido, mas não consegui mapear a grade de bolinhas na imagem (Achou {len(bolinhas_validas)} de {bolinhas_esperadas}).")
+                contornos, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                
+                # Proporção ideal da caixa do gabarito gerada pelo seu PDF
+                target_ratio = 65.0 / (10 + 6 * N_questoes)
+                melhor_contorno = None
+                menor_erro = 1000
+                
+                for c in contornos:
+                    perimetro = cv2.arcLength(c, True)
+                    aproximacao = cv2.approxPolyDP(c, 0.04 * perimetro, True)
+                    if len(aproximacao) == 4:
+                        x, y, w, h = cv2.boundingRect(aproximacao)
+                        # A caixa do gabarito tem que ser relativamente grande e estar à esquerda do QR Code
+                        if w > 50 and h > 50 and (x + w/2 < qr_rect.left + qr_rect.width):
+                            ratio = w / float(h)
+                            erro = abs(ratio - target_ratio) / target_ratio
+                            # Margem de tolerância de 25% para a proporção do retângulo
+                            if erro < 0.25: 
+                                if erro < menor_erro:
+                                    menor_erro = erro
+                                    melhor_contorno = aproximacao
+                
+                gabarito_warped = None
+                if melhor_contorno is not None:
+                    st.write("✅ Caixa preta do gabarito detectada. Corrigindo perspectiva...")
+                    pontos_doc = ordenar_pontos(melhor_contorno)
+                    pontos_destino = np.array([[0, 0], [target_w - 1, 0], [target_w - 1, target_h - 1], [0, target_h - 1]], dtype="float32")
+                    matriz = cv2.getPerspectiveTransform(pontos_doc, pontos_destino)
+                    gabarito_warped = cv2.warpPerspective(thresh, matriz, (target_w, target_h))
                 else:
-                    status.update(label="Nenhuma questão encontrada no QR Code", state="error", expanded=True)
+                    st.write("⚠️ Contorno da caixa não encontrado. Aplicando inferência geométrica a partir do QR Code...")
+                    # Se for um Print de tela e a borda cortar, ele calcula a posição da caixa baseado no QR Code!
+                    K = qr_rect.width / 25.0
+                    gab_x = max(0, int(qr_rect.left - 70 * K))
+                    gab_y = max(0, int(qr_rect.top))
+                    gab_w = int(65 * K)
+                    gab_h = int((10 + 6 * N_questoes) * K)
+                    
+                    gabarito_crop = thresh[gab_y:gab_y+gab_h, gab_x:gab_x+gab_w]
+                    if gabarito_crop.size > 0:
+                        gabarito_warped = cv2.resize(gabarito_crop, (target_w, target_h))
+                    else:
+                        status.update(label="Erro crítico no recorte", state="error", expanded=True)
+                        st.error("❌ Não foi possível extrair a área do gabarito matematicamente.")
+                        passo_sucesso = False
+                        
+                if passo_sucesso and gabarito_warped is not None:
+                    st.write("📝 Medindo densidade de tinta por questão (ignorando bolinhas vazias)...")
+                    
+                    respostas_lidas = []
+                    acertos = 0
+                    letras = ['A', 'B', 'C', 'D', 'E']
+                    
+                    # Como a imagem foi convertida para um padrão 650x(100+60N), sabemos a localização exata de cada letra
+                    for i in range(N_questoes):
+                        y_centro = 105 + i * 60
+                        densidades = []
+                        
+                        for j in range(5):
+                            x_centro = 130 + j * 100
+                            
+                            # Faz um recorte pequeno (50x30 pixels) exatamente no miolo de onde a letra deveria estar
+                            cell_roi = gabarito_warped[max(0, y_centro - 15) : y_centro + 15, max(0, x_centro - 25) : x_centro + 25]
+                            
+                            if cell_roi.size > 0:
+                                total_pixels = cell_roi.shape[0] * cell_roi.shape[1]
+                                pixels_brancos = cv2.countNonZero(cell_roi) # Pixels brancos = tinta preta detectada
+                                densidade = pixels_brancos / float(total_pixels)
+                            else:
+                                densidade = 0.0
+                                
+                            densidades.append(densidade)
+                            
+                        # Avalia a opção mais escura daquela questão
+                        max_dens = max(densidades)
+                        idx_marcada = densidades.index(max_dens)
+                        
+                        # Uma letra "O" puramente vazia atinge no máximo ~20% de densidade devido à sua borda fina.
+                        # Se o aluno preencheu, o bloco escuro passa facilmente dos 50%.
+                        if max_dens > 0.40:
+                            respostas_lidas.append(letras[idx_marcada])
+                        else:
+                            respostas_lidas.append("Em Branco")
+                            
+                    for lida, oficial in zip(respostas_lidas, gabarito_oficial):
+                        if lida == oficial:
+                            acertos += 1
+                            
+                    nota_calculada = (acertos / N_questoes) * 10.0
+                    
+                    st.session_state.resultado_analise = {
+                        'prova_id': prova_id_detectada,
+                        'gabarito_oficial': gabarito_oficial,
+                        'respostas_lidas': respostas_lidas,
+                        'nota': nota_calculada,
+                        'acertos': acertos,
+                        'total_questoes': N_questoes
+                    }
+                    status.update(label="Correção Óptica Finalizada!", state="complete", expanded=False)
 
     # Renderiza o painel cruzado e o formulário
     resultado = st.session_state.resultado_analise
@@ -365,7 +399,6 @@ with aba_corrigir:
         st.subheader("🔍 Raio-X da Correção Automática")
         st.write(f"**ID da Prova:** `{resultado['prova_id']}`")
         
-        # O Dataframe agora cruza as informações exatamente da forma lógica que você pediu
         df_resultado = pd.DataFrame({
             "Questão": [f"{i+1}" for i in range(resultado['total_questoes'])],
             "Gabarito Oficial": resultado['gabarito_oficial'],
