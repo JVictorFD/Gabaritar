@@ -195,17 +195,21 @@ with aba_gerar:
 with aba_corrigir:
     st.write("Tire uma foto nítida do cabeçalho da prova para corrigir.")
     
-    # 1. Protegemos os dados da tela usando Session State
     if 'imagem_processada' not in st.session_state:
         st.session_state.imagem_processada = None
     if 'nota_calculada' not in st.session_state:
         st.session_state.nota_calculada = None
     if 'prova_id_atual' not in st.session_state:
         st.session_state.prova_id_atual = None
+    if 'sucesso_salvamento' not in st.session_state:
+        st.session_state.sucesso_salvamento = False
         
     foto_prova = st.file_uploader("📷 Tirar Foto (Usa a Câmera Nativa do Celular)", type=['png', 'jpg', 'jpeg'])
     
-    # Se o professor enviou uma foto AGORA, nós processamos e salvamos no cofre da sessão
+    if st.session_state.sucesso_salvamento:
+        st.success("Nota salva com sucesso no banco de dados! Pode escanear a próxima.")
+        st.session_state.sucesso_salvamento = False
+    
     if foto_prova is not None and st.session_state.imagem_processada != foto_prova.file_id:
         with st.spinner("Analisando Gabarito..."):
             bytes_data = foto_prova.getvalue()
@@ -293,40 +297,35 @@ with aba_corrigir:
             else:
                 st.error("❌ Não foi possível ler o QR Code. Fique em um local bem iluminado e alinhe a câmera.")
                 
-            # Salva o arquivo atual na sessão para não re-processar na próxima vez que a tela piscar
             st.session_state.imagem_processada = foto_prova.file_id
 
-    # 2. Exibe o formulário de nota apenas se nós conseguimos concluir uma análise
+    # 2. Exibe o formulário independentemente do loop de recarregamento
     if st.session_state.nota_calculada is not None:
-        with st.form("form_salvar_nota", clear_on_submit=True):
-            st.subheader("Registrar no Sistema")
-            col_n, col_m, col_v = st.columns([2, 1, 1])
-            
-            with col_n:
-                nome_aluno = st.text_input("Nome do Aluno")
-            with col_m:
-                matricula_aluno = st.text_input("Matrícula")
-            with col_v:
-                st.metric(label="Nota Final", value=f"{st.session_state.nota_calculada:.1f}")
-            
-            submit = st.form_submit_button("Salvar no Banco de Dados 💾", type="primary")
-            
-            if submit:
-                if nome_aluno:
-                    conn = sqlite3.connect('notas_alunos.db')
-                    c = conn.cursor()
-                    c.execute("INSERT INTO correcoes (prova_id, nome_aluno, matricula, nota) VALUES (?, ?, ?, ?)", 
-                              (st.session_state.prova_id_atual, nome_aluno, matricula_aluno, st.session_state.nota_calculada))
-                    conn.commit()
-                    conn.close()
-                    st.success(f"Nota de {nome_aluno} salva com sucesso! O sistema foi zerado. Tire a foto da próxima prova.")
-                    
-                    # Limpa a memória para aceitar a próxima folha
-                    st.session_state.imagem_processada = None
-                    st.session_state.nota_calculada = None
-                    st.session_state.prova_id_atual = None
-                else:
-                    st.error("Digite o nome do aluno antes de salvar.")
+        st.subheader("Registrar no Sistema")
+        col_n, col_m, col_v = st.columns([2, 1, 1])
+        
+        nome_aluno = col_n.text_input("Nome do Aluno")
+        matricula_aluno = col_m.text_input("Matrícula")
+        col_v.metric(label="Nota Final", value=f"{st.session_state.nota_calculada:.1f}")
+        
+        # Tiramos o form para evitar o conflito de chaves internas do Streamlit
+        if st.button("Salvar no Banco de Dados 💾", type="primary"):
+            if nome_aluno:
+                conn = sqlite3.connect('notas_alunos.db')
+                c = conn.cursor()
+                c.execute("INSERT INTO correcoes (prova_id, nome_aluno, matricula, nota) VALUES (?, ?, ?, ?)", 
+                          (st.session_state.prova_id_atual, nome_aluno, matricula_aluno, st.session_state.nota_calculada))
+                conn.commit()
+                conn.close()
+                
+                # Zera a memória e aciona a flag de sucesso para a próxima rodada
+                st.session_state.imagem_processada = None
+                st.session_state.nota_calculada = None
+                st.session_state.prova_id_atual = None
+                st.session_state.sucesso_salvamento = True
+                st.rerun()
+            else:
+                st.error("Digite o nome do aluno antes de salvar.")
 
 # ==========================================
 # ABA 3: RELATÓRIOS E EXPORTAÇÃO
