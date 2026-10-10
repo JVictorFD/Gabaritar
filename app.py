@@ -7,6 +7,7 @@ from fpdf import FPDF
 import cv2
 import numpy as np
 import sqlite3
+import pandas as pd
 
 st.set_page_config(page_title="Gabaritar - Sistema OMR", page_icon="📝", layout="wide")
 
@@ -195,133 +196,166 @@ with aba_gerar:
 with aba_corrigir:
     st.write("Tire uma foto nítida do cabeçalho da prova para corrigir.")
     
+    # Cofre de dados da sessão para blindar contra recarregamentos da interface
     if 'imagem_processada' not in st.session_state:
         st.session_state.imagem_processada = None
-    if 'nota_calculada' not in st.session_state:
-        st.session_state.nota_calculada = None
-    if 'prova_id_atual' not in st.session_state:
-        st.session_state.prova_id_atual = None
+    if 'resultado_analise' not in st.session_state:
+        st.session_state.resultado_analise = None
     if 'sucesso_salvamento' not in st.session_state:
         st.session_state.sucesso_salvamento = False
         
     foto_prova = st.file_uploader("📷 Tirar Foto (Usa a Câmera Nativa do Celular)", type=['png', 'jpg', 'jpeg'])
     
     if st.session_state.sucesso_salvamento:
-        st.success("Nota salva com sucesso no banco de dados! Pode escanear a próxima.")
+        st.success("✨ Avaliação processada e salva com sucesso no banco de dados!")
         st.session_state.sucesso_salvamento = False
     
     if foto_prova is not None and st.session_state.imagem_processada != foto_prova.file_id:
-        with st.spinner("Analisando Gabarito..."):
+        with st.spinner("Decodificando QR Code e Analisando Bolinhas..."):
             bytes_data = foto_prova.getvalue()
             array_np = np.frombuffer(bytes_data, np.uint8)
-            img_cv2 = cv2.imdecode(array_np, cv2.IMREAD_COLOR)
+            img_cv2_orig = cv2.imdecode(array_np, cv2.IMREAD_COLOR)
+            
+            # 1. Lê o QR Code na imagem ORIGINAL (para não perder definição do texto)
+            cinza_orig = cv2.cvtColor(img_cv2_orig, cv2.COLOR_BGR2GRAY)
+            detector_qr = cv2.QRCodeDetector()
+            conteudo_qr, _, _ = detector_qr.detectAndDecode(cinza_orig)
+            
+            prova_id_detectada = "DESCONHECIDO"
+            gabarito_oficial = []
+            
+            if conteudo_qr:
+                if "|" in conteudo_qr:
+                    prova_id_detectada, string_gabarito = conteudo_qr.split("|")
+                    partes = string_gabarito.split(";")
+                    for p in partes:
+                        if "-" in p:
+                            _, resposta = p.split("-")
+                            gabarito_oficial.append(resposta.strip())
+                else:
+                    prova_id_detectada = conteudo_qr
+            
+            # 2. Redimensiona a imagem para padronizar o tamanho dos círculos para a leitura (OMR)
+            alt_orig, larg_orig = img_cv2_orig.shape[:2]
+            nova_larg = 1000
+            prop = nova_larg / float(larg_orig)
+            nova_alt = int(alt_orig * prop)
+            img_cv2 = cv2.resize(img_cv2_orig, (nova_larg, nova_alt))
             
             cinza = cv2.cvtColor(img_cv2, cv2.COLOR_BGR2GRAY)
             suavizada = cv2.GaussianBlur(cinza, (5, 5), 0)
             _, thresh = cv2.threshold(suavizada, 128, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
-            
-            detector_qr = cv2.QRCodeDetector()
-            conteudo_qr, _, _ = detector_qr.detectAndDecode(cinza)
-            
-            st.session_state.prova_id_atual = "DESCONHECIDO"
-            st.session_state.nota_calculada = 0.0
-            gabarito_oficial = []
-            
-            if conteudo_qr:
-                try:
-                    if "|" in conteudo_qr:
-                        prova_id, string_gabarito = conteudo_qr.split("|")
-                        st.session_state.prova_id_atual = prova_id
-                        st.success(f"✅ Prova: **{prova_id}** | Chave Offline extraída com sucesso!")
-                        
-                        partes = string_gabarito.split(";")
-                        for p in partes:
-                            if "-" in p:
-                                _, resposta = p.split("-")
-                                gabarito_oficial.append(resposta.strip())
-                    else:
-                        st.session_state.prova_id_atual = conteudo_qr
-                        st.warning(f"⚠️ Prova lida (ID: {st.session_state.prova_id_atual}), mas nenhum gabarito estava atrelado ao QR Code.")
-                except Exception as e:
-                    st.error("Erro ao decodificar chave do QR Code.")
 
-                if gabarito_oficial:
-                    total_questoes = len(gabarito_oficial)
-                    
-                    contornos, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                    bolinhas_validas = []
-                    
-                    for c in contornos:
-                        (x, y, w, h) = cv2.boundingRect(c)
-                        proporcao = w / float(h)
-                        if 0.7 <= proporcao <= 1.3 and 10 <= w <= 60:
-                            bolinhas_validas.append(c)
-                    
-                    bolinhas_esperadas = total_questoes * 5
-                    
-                    if len(bolinhas_validas) >= bolinhas_esperadas and total_questoes > 0:
-                        bolinhas_validas = sorted(bolinhas_validas, key=lambda b: cv2.boundingRect(b)[1])
-                        
-                        respostas_lidas = []
-                        acertos = 0
-                        
-                        for i in range(0, min(len(bolinhas_validas), bolinhas_esperadas), 5):
-                            linha = bolinhas_validas[i:i+5]
-                            linha = sorted(linha, key=lambda b: cv2.boundingRect(b)[0])
-                            
-                            marcada = None
-                            max_pixels = 0
-                            
-                            for j, bolinha in enumerate(linha):
-                                mask = np.zeros(thresh.shape, dtype="uint8")
-                                cv2.drawContours(mask, [bolinha], -1, 255, -1)
-                                mask = cv2.bitwise_and(thresh, thresh, mask=mask)
-                                total_pixels = cv2.countNonZero(mask)
-                                
-                                if total_pixels > max_pixels:
-                                    max_pixels = total_pixels
-                                    marcada = j
-                                    
-                            letras = ['A', 'B', 'C', 'D', 'E']
-                            if marcada is not None:
-                                respostas_lidas.append(letras[marcada])
-                                
-                        for lida, oficial in zip(respostas_lidas, gabarito_oficial):
-                            if lida == oficial:
-                                acertos += 1
-                                
-                        st.session_state.nota_calculada = (acertos / total_questoes) * 10.0
-                        st.info(f"🎯 **Correção Offline Concluída:** {acertos} acertos de {total_questoes} questões.")
-                    else:
-                        st.warning(f"⚠️ Máquina encontrou irregularidade. Bolinhas detectadas: {len(bolinhas_validas)}. Aproxime o celular da caixa de respostas.")
-            else:
-                st.error("❌ Não foi possível ler o QR Code. Fique em um local bem iluminado e alinhe a câmera.")
+            nota_calculada = 0.0
+            respostas_lidas = []
+            acertos = 0
+            total_questoes = len(gabarito_oficial)
+            
+            if total_questoes > 0:
+                # 3. Busca bolinhas na imagem redimensionada
+                # RETR_EXTERNAL ignora bordas duplas da mesma bolinha
+                contornos, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                bolinhas_validas = []
                 
+                for c in contornos:
+                    (x, y, w, h) = cv2.boundingRect(c)
+                    proporcao = w / float(h)
+                    # Com largura padronizada em 1000px, as bolinhas reais ficam entre 15 e 60 pixels
+                    if 0.7 <= proporcao <= 1.3 and 15 <= w <= 60:
+                        bolinhas_validas.append(c)
+                
+                bolinhas_esperadas = total_questoes * 5
+                
+                if len(bolinhas_validas) >= bolinhas_esperadas:
+                    # Ordena de cima para baixo (Linhas/Questões)
+                    bolinhas_validas = sorted(bolinhas_validas, key=lambda b: cv2.boundingRect(b)[1])
+                    
+                    for i in range(0, min(len(bolinhas_validas), bolinhas_esperadas), 5):
+                        linha = bolinhas_validas[i:i+5]
+                        # Ordena da esquerda para a direita (Colunas/Alternativas)
+                        linha = sorted(linha, key=lambda b: cv2.boundingRect(b)[0])
+                        
+                        marcada = None
+                        max_pixels = 0
+                        area_media = 0
+                        
+                        for j, bolinha in enumerate(linha):
+                            mask = np.zeros(thresh.shape, dtype="uint8")
+                            cv2.drawContours(mask, [bolinha], -1, 255, -1)
+                            mask = cv2.bitwise_and(thresh, thresh, mask=mask)
+                            total_pixels = cv2.countNonZero(mask)
+                            
+                            if total_pixels > max_pixels:
+                                max_pixels = total_pixels
+                                marcada = j
+                                _, _, bw, bh = cv2.boundingRect(bolinha)
+                                area_media = bw * bh
+                                
+                        letras = ['A', 'B', 'C', 'D', 'E']
+                        # Só considera a questão marcada se tiver pelo menos 30% da área coberta de tinta
+                        if marcada is not None and max_pixels > (area_media * 0.3):
+                            respostas_lidas.append(letras[marcada])
+                        else:
+                            respostas_lidas.append("Nula/Branco")
+                            
+                    for lida, oficial in zip(respostas_lidas, gabarito_oficial):
+                        if lida == oficial:
+                            acertos += 1
+                            
+                    nota_calculada = (acertos / total_questoes) * 10.0
+                    st.success("✅ Avaliação Óptica finalizada com sucesso!")
+                else:
+                    st.warning(f"⚠️ A câmera não identificou as {bolinhas_esperadas} marcações perfeitamente. Achou apenas {len(bolinhas_validas)}. Tente melhorar a luz ou o enquadramento.")
+
+            # Salva TUDO no dicionário da sessão para a tela não apagar
+            st.session_state.resultado_analise = {
+                'prova_id': prova_id_detectada,
+                'gabarito_oficial': gabarito_oficial,
+                'respostas_lidas': respostas_lidas,
+                'nota': nota_calculada,
+                'acertos': acertos,
+                'total_questoes': total_questoes
+            }
             st.session_state.imagem_processada = foto_prova.file_id
 
-    # 2. Exibe o formulário independentemente do loop de recarregamento
-    if st.session_state.nota_calculada is not None:
-        st.subheader("Registrar no Sistema")
+    # 4. Renderiza o resultado cruzado de forma estática (Baseado na memória)
+    resultado = st.session_state.resultado_analise
+    if resultado is not None and resultado['total_questoes'] > 0:
+        
+        st.markdown("---")
+        st.subheader("🔍 Raio-X da Correção Automática")
+        st.write(f"**ID da Prova:** `{resultado['prova_id']}`")
+        
+        # Cria a tabela comparativa usando Pandas
+        df_resultado = pd.DataFrame({
+            "Questão": [f"{i+1}" for i in range(resultado['total_questoes'])],
+            "Gabarito Oficial": resultado['gabarito_oficial'],
+            "Marcada pelo Aluno": resultado['respostas_lidas'],
+            "Status": ["✅ Correta" if l == o else "❌ Errada" for l, o in zip(resultado['respostas_lidas'], resultado['gabarito_oficial'])]
+        })
+        
+        st.dataframe(df_resultado, use_container_width=True, hide_index=True)
+        
+        st.markdown("---")
+        st.subheader("🎓 Inserir Boletim do Aluno")
         col_n, col_m, col_v = st.columns([2, 1, 1])
         
         nome_aluno = col_n.text_input("Nome do Aluno")
         matricula_aluno = col_m.text_input("Matrícula")
-        col_v.metric(label="Nota Final", value=f"{st.session_state.nota_calculada:.1f}")
+        col_v.metric(label="Nota Calculada", value=f"{resultado['nota']:.1f}", delta=f"{resultado['acertos']} Acertos", delta_color="normal")
         
-        # Tiramos o form para evitar o conflito de chaves internas do Streamlit
         if st.button("Salvar no Banco de Dados 💾", type="primary"):
             if nome_aluno:
                 conn = sqlite3.connect('notas_alunos.db')
                 c = conn.cursor()
                 c.execute("INSERT INTO correcoes (prova_id, nome_aluno, matricula, nota) VALUES (?, ?, ?, ?)", 
-                          (st.session_state.prova_id_atual, nome_aluno, matricula_aluno, st.session_state.nota_calculada))
+                          (resultado['prova_id'], nome_aluno, matricula_aluno, resultado['nota']))
                 conn.commit()
                 conn.close()
                 
                 # Zera a memória e aciona a flag de sucesso para a próxima rodada
                 st.session_state.imagem_processada = None
-                st.session_state.nota_calculada = None
-                st.session_state.prova_id_atual = None
+                st.session_state.resultado_analise = None
                 st.session_state.sucesso_salvamento = True
                 st.rerun()
             else:
@@ -337,7 +371,6 @@ with aba_relatorio:
         pass 
         
     conn = sqlite3.connect('notas_alunos.db')
-    import pandas as pd
     df_notas = pd.read_sql_query("SELECT id, prova_id as ID_Prova, nome_aluno as Nome, matricula as Matrícula, nota as Nota, data_hora as Data FROM correcoes", conn)
     conn.close()
     
