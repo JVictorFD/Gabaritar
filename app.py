@@ -195,8 +195,8 @@ with aba_gerar:
 with aba_corrigir:
     st.write("Tire uma foto nítida e bem iluminada do cabeçalho da prova.")
     
-    # Parâmetro facing_mode="environment" força o celular a abrir a lente traseira
-    foto_prova = st.camera_input("📷 Escanear Folha", facing_mode="environment")
+    # Parâmetro facing_mode removido para evitar o TypeError do Streamlit
+    foto_prova = st.camera_input("📷 Escanear Folha")
     
     if foto_prova is not None:
         bytes_data = foto_prova.getvalue()
