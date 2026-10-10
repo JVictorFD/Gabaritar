@@ -9,6 +9,8 @@ import numpy as np
 import sqlite3
 import pandas as pd
 import time
+from PIL import Image, ImageOps # Importamos o Pillow para corrigir imagens de celular
+import io
 
 st.set_page_config(page_title="Gabaritar - Sistema OMR", page_icon="📝", layout="wide")
 
@@ -212,18 +214,28 @@ with aba_corrigir:
     
     if foto_prova is not None and st.session_state.imagem_processada != foto_prova.file_id:
         
-        # Inicia o container de status visual da operação
+        # O bloco de status agora é inicializado antes de QUALQUER manipulação da foto
         with st.status("Iniciando escaneamento da prova...", expanded=True) as status:
+            st.write("🔄 Tratando formato e rotação da imagem do celular...")
             
-            # Passo 1
-            st.write("📸 Foto carregada na memória com sucesso.")
-            time.sleep(0.5) # Leve delay visual para o usuário conseguir ler
+            try:
+                # O Pillow carrega a imagem em segurança e corrige a orientação rotacionada do iPhone/Android
+                imagem_pil = Image.open(io.BytesIO(foto_prova.getvalue()))
+                imagem_pil = ImageOps.exif_transpose(imagem_pil)
+                
+                # Converte o RGB seguro do Pillow para o padrão BGR que o OpenCV entende e precisa
+                array_pil = np.array(imagem_pil)
+                if array_pil.shape[2] == 4: # Remove canal Alpha se a foto for transparente (PNG)
+                    array_pil = cv2.cvtColor(array_pil, cv2.COLOR_RGBA2RGB)
+                
+                img_cv2_orig = cv2.cvtColor(array_pil, cv2.COLOR_RGB2BGR)
+                
+                st.write("📸 Foto carregada na memória com sucesso.")
+            except Exception as e:
+                status.update(label="Falha ao ler arquivo da câmera", state="error", expanded=True)
+                st.error(f"❌ O formato da imagem enviada pelo seu celular não pôde ser lido. Erro interno: {e}")
+                st.stop()
             
-            bytes_data = foto_prova.getvalue()
-            array_np = np.frombuffer(bytes_data, np.uint8)
-            img_cv2_orig = cv2.imdecode(array_np, cv2.IMREAD_COLOR)
-            
-            # Passo 2
             st.write("🔍 Extraindo informações do QR Code...")
             cinza_orig = cv2.cvtColor(img_cv2_orig, cv2.COLOR_BGR2GRAY)
             detector_qr = cv2.QRCodeDetector()
@@ -247,9 +259,8 @@ with aba_corrigir:
             else:
                 status.update(label="Falha na leitura do QR Code", state="error", expanded=True)
                 st.error("❌ O sistema não encontrou o QR Code. Aproxime a câmera do canto direito do cabeçalho.")
-                st.stop() # Interrompe o processamento aqui se não achar o QR
+                st.stop()
             
-            # Passo 3
             st.write("⚙️ Analisando gabarito na imagem...")
             
             alt_orig, larg_orig = img_cv2_orig.shape[:2]
@@ -282,7 +293,6 @@ with aba_corrigir:
                 st.write(f"ℹ️ Encontradas {len(bolinhas_validas)} formas circulares (Esperado: {bolinhas_esperadas}).")
                 
                 if len(bolinhas_validas) >= bolinhas_esperadas:
-                    # Passo 4
                     st.write("📝 Processando marcações e calculando nota...")
                     
                     bolinhas_validas = sorted(bolinhas_validas, key=lambda b: cv2.boundingRect(b)[1])
@@ -319,7 +329,6 @@ with aba_corrigir:
                             
                     nota_calculada = (acertos / total_questoes) * 10.0
                     
-                    # Salva TUDO no dicionário
                     st.session_state.resultado_analise = {
                         'prova_id': prova_id_detectada,
                         'gabarito_oficial': gabarito_oficial,
@@ -332,13 +341,12 @@ with aba_corrigir:
                     
                     status.update(label="Correção Óptica Finalizada!", state="complete", expanded=False)
                 else:
-                    # Se falhar aqui, avisa no status o erro de forma nítida
                     status.update(label="Erro no enquadramento do gabarito", state="error", expanded=True)
                     st.error("❌ A câmera não identificou o quadro do gabarito perfeitamente. Certifique-se de que não há reflexos e toda a caixa de respostas está na foto.")
             else:
                 status.update(label="Nenhuma questão encontrada no QR Code", state="error", expanded=True)
 
-    # 5. Renderiza o resultado cruzado de forma estática (Baseado na memória)
+    # Renderiza o painel final e o form
     resultado = st.session_state.resultado_analise
     if resultado is not None and resultado['total_questoes'] > 0:
         
