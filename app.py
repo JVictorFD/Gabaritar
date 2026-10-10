@@ -9,8 +9,11 @@ import numpy as np
 import sqlite3
 import pandas as pd
 import time
-from PIL import Image, ImageOps # Importamos o Pillow para corrigir imagens de celular
+from PIL import Image, ImageOps
 import io
+
+# Importamos o PyZbar para leitura avançada de QR Codes minúsculos ou distantes
+from pyzbar.pyzbar import decode
 
 st.set_page_config(page_title="Gabaritar - Sistema OMR", page_icon="📝", layout="wide")
 
@@ -197,7 +200,7 @@ with aba_gerar:
 # ABA 2: MÓDULO DE ESCANEAMENTO (OMR INTELIGENTE)
 # ==========================================
 with aba_corrigir:
-    st.write("Tire uma foto nítida do cabeçalho da prova para corrigir.")
+    st.write("Afaste um pouco o celular. A foto deve enquadrar tanto a caixa de Gabarito inteira quanto o QR Code.")
     
     if 'imagem_processada' not in st.session_state:
         st.session_state.imagem_processada = None
@@ -214,32 +217,35 @@ with aba_corrigir:
     
     if foto_prova is not None and st.session_state.imagem_processada != foto_prova.file_id:
         
-        # O bloco de status agora é inicializado antes de QUALQUER manipulação da foto
         with st.status("Iniciando escaneamento da prova...", expanded=True) as status:
             st.write("🔄 Tratando formato e rotação da imagem do celular...")
             
             try:
-                # O Pillow carrega a imagem em segurança e corrige a orientação rotacionada do iPhone/Android
                 imagem_pil = Image.open(io.BytesIO(foto_prova.getvalue()))
                 imagem_pil = ImageOps.exif_transpose(imagem_pil)
                 
-                # Converte o RGB seguro do Pillow para o padrão BGR que o OpenCV entende e precisa
                 array_pil = np.array(imagem_pil)
-                if array_pil.shape[2] == 4: # Remove canal Alpha se a foto for transparente (PNG)
+                if array_pil.shape[2] == 4: 
                     array_pil = cv2.cvtColor(array_pil, cv2.COLOR_RGBA2RGB)
                 
                 img_cv2_orig = cv2.cvtColor(array_pil, cv2.COLOR_RGB2BGR)
-                
                 st.write("📸 Foto carregada na memória com sucesso.")
             except Exception as e:
                 status.update(label="Falha ao ler arquivo da câmera", state="error", expanded=True)
-                st.error(f"❌ O formato da imagem enviada pelo seu celular não pôde ser lido. Erro interno: {e}")
+                st.error(f"❌ Erro ao decodificar a foto: {e}")
                 st.stop()
             
             st.write("🔍 Extraindo informações do QR Code...")
-            cinza_orig = cv2.cvtColor(img_cv2_orig, cv2.COLOR_BGR2GRAY)
-            detector_qr = cv2.QRCodeDetector()
-            conteudo_qr, _, _ = detector_qr.detectAndDecode(cinza_orig)
+            
+            # --- NOVO: IMPLEMENTAÇÃO DO PYZBAR ---
+            # PyZbar usa a imagem RGB/BGR pura, sem precisar de threshold cinza e agressivo, 
+            # o que o torna infinitamente superior para ler QR Codes distantes ou pequenos.
+            codigos_lidos = decode(img_cv2_orig)
+            conteudo_qr = None
+            
+            if codigos_lidos:
+                # Pega o conteúdo do primeiro código de barras/QR encontrado na foto
+                conteudo_qr = codigos_lidos[0].data.decode("utf-8")
             
             prova_id_detectada = "DESCONHECIDO"
             gabarito_oficial = []
@@ -258,7 +264,7 @@ with aba_corrigir:
                     st.write(f"⚠️ Atenção: QR lido ({prova_id_detectada}), mas sem gabarito atrelado.")
             else:
                 status.update(label="Falha na leitura do QR Code", state="error", expanded=True)
-                st.error("❌ O sistema não encontrou o QR Code. Aproxime a câmera do canto direito do cabeçalho.")
+                st.error("❌ O sistema não encontrou o QR Code. Certifique-se de que a foto pegou a folha inteira e o código está nítido.")
                 st.stop()
             
             st.write("⚙️ Analisando gabarito na imagem...")
@@ -342,11 +348,10 @@ with aba_corrigir:
                     status.update(label="Correção Óptica Finalizada!", state="complete", expanded=False)
                 else:
                     status.update(label="Erro no enquadramento do gabarito", state="error", expanded=True)
-                    st.error("❌ A câmera não identificou o quadro do gabarito perfeitamente. Certifique-se de que não há reflexos e toda a caixa de respostas está na foto.")
+                    st.error(f"❌ A câmera achou o QR Code perfeitamente, mas perdeu o Gabarito (Achou {len(bolinhas_validas)} de {bolinhas_esperadas} círculos). Tire uma foto sem cortar a caixa de gabarito à esquerda.")
             else:
                 status.update(label="Nenhuma questão encontrada no QR Code", state="error", expanded=True)
 
-    # Renderiza o painel final e o form
     resultado = st.session_state.resultado_analise
     if resultado is not None and resultado['total_questoes'] > 0:
         
