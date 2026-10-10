@@ -12,7 +12,6 @@ import time
 from PIL import Image, ImageOps
 import io
 
-# Importamos o PyZbar para leitura avançada de QR Codes minúsculos ou distantes
 from pyzbar.pyzbar import decode
 
 st.set_page_config(page_title="Gabaritar - Sistema OMR", page_icon="📝", layout="wide")
@@ -212,146 +211,143 @@ with aba_corrigir:
     foto_prova = st.file_uploader("📷 Tirar Foto (Usa a Câmera Nativa do Celular)", type=['png', 'jpg', 'jpeg'])
     
     if st.session_state.sucesso_salvamento:
-        st.success("✨ Avaliação processada e salva com sucesso no banco de dados!")
+        st.success("✨ Avaliação salva com sucesso no banco de dados!")
         st.session_state.sucesso_salvamento = False
     
     if foto_prova is not None and st.session_state.imagem_processada != foto_prova.file_id:
         
+        # 1. Registra imediatamente a foto como processada para evitar loops de recarregamento
+        st.session_state.imagem_processada = foto_prova.file_id
+        st.session_state.resultado_analise = None
+        
         with st.status("Iniciando escaneamento da prova...", expanded=True) as status:
+            passo_sucesso = True
             st.write("🔄 Tratando formato e rotação da imagem do celular...")
             
             try:
                 imagem_pil = Image.open(io.BytesIO(foto_prova.getvalue()))
                 imagem_pil = ImageOps.exif_transpose(imagem_pil)
-                
                 array_pil = np.array(imagem_pil)
                 if array_pil.shape[2] == 4: 
                     array_pil = cv2.cvtColor(array_pil, cv2.COLOR_RGBA2RGB)
-                
                 img_cv2_orig = cv2.cvtColor(array_pil, cv2.COLOR_RGB2BGR)
                 st.write("📸 Foto carregada na memória com sucesso.")
             except Exception as e:
-                status.update(label="Falha ao ler arquivo da câmera", state="error", expanded=True)
+                status.update(label="Falha ao decodificar a foto", state="error", expanded=True)
                 st.error(f"❌ Erro ao decodificar a foto: {e}")
-                st.stop()
-            
-            st.write("🔍 Extraindo informações do QR Code...")
-            
-            # --- NOVO: IMPLEMENTAÇÃO DO PYZBAR ---
-            # PyZbar usa a imagem RGB/BGR pura, sem precisar de threshold cinza e agressivo, 
-            # o que o torna infinitamente superior para ler QR Codes distantes ou pequenos.
-            codigos_lidos = decode(img_cv2_orig)
-            conteudo_qr = None
-            
-            if codigos_lidos:
-                # Pega o conteúdo do primeiro código de barras/QR encontrado na foto
-                conteudo_qr = codigos_lidos[0].data.decode("utf-8")
+                passo_sucesso = False
             
             prova_id_detectada = "DESCONHECIDO"
             gabarito_oficial = []
             
-            if conteudo_qr:
-                if "|" in conteudo_qr:
-                    prova_id_detectada, string_gabarito = conteudo_qr.split("|")
-                    partes = string_gabarito.split(";")
-                    for p in partes:
-                        if "-" in p:
-                            _, resposta = p.split("-")
-                            gabarito_oficial.append(resposta.strip())
-                    st.write(f"✅ Respostas extraídas: A chave do ID **{prova_id_detectada}** foi carregada.")
+            if passo_sucesso:
+                st.write("🔍 Extraindo informações do QR Code...")
+                codigos_lidos = decode(img_cv2_orig)
+                conteudo_qr = None
+                
+                if codigos_lidos:
+                    conteudo_qr = codigos_lidos[0].data.decode("utf-8")
+                
+                if conteudo_qr:
+                    if "|" in conteudo_qr:
+                        prova_id_detectada, string_gabarito = conteudo_qr.split("|")
+                        partes = string_gabarito.split(";")
+                        for p in partes:
+                            if "-" in p:
+                                _, resposta = p.split("-")
+                                gabarito_oficial.append(resposta.strip())
+                        st.write(f"✅ Respostas extraídas: A chave do ID **{prova_id_detectada}** foi carregada.")
+                    else:
+                        prova_id_detectada = conteudo_qr
+                        st.write(f"⚠️ Atenção: QR lido ({prova_id_detectada}), mas sem gabarito atrelado.")
                 else:
-                    prova_id_detectada = conteudo_qr
-                    st.write(f"⚠️ Atenção: QR lido ({prova_id_detectada}), mas sem gabarito atrelado.")
-            else:
-                status.update(label="Falha na leitura do QR Code", state="error", expanded=True)
-                st.error("❌ O sistema não encontrou o QR Code. Certifique-se de que a foto pegou a folha inteira e o código está nítido.")
-                st.stop()
+                    status.update(label="Falha na leitura do QR Code", state="error", expanded=True)
+                    st.error("❌ O sistema não encontrou o QR Code. Certifique-se de que a foto pegou a folha inteira e o código está nítido.")
+                    passo_sucesso = False
             
-            st.write("⚙️ Analisando gabarito na imagem...")
-            
-            alt_orig, larg_orig = img_cv2_orig.shape[:2]
-            nova_larg = 1000
-            prop = nova_larg / float(larg_orig)
-            nova_alt = int(alt_orig * prop)
-            img_cv2 = cv2.resize(img_cv2_orig, (nova_larg, nova_alt))
-            
-            cinza = cv2.cvtColor(img_cv2, cv2.COLOR_BGR2GRAY)
-            suavizada = cv2.GaussianBlur(cinza, (5, 5), 0)
-            _, thresh = cv2.threshold(suavizada, 128, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
+            if passo_sucesso:
+                st.write("⚙️ Analisando gabarito na imagem...")
+                alt_orig, larg_orig = img_cv2_orig.shape[:2]
+                nova_larg = 1000
+                prop = nova_larg / float(larg_orig)
+                nova_alt = int(alt_orig * prop)
+                img_cv2 = cv2.resize(img_cv2_orig, (nova_larg, nova_alt))
+                
+                cinza = cv2.cvtColor(img_cv2, cv2.COLOR_BGR2GRAY)
+                suavizada = cv2.GaussianBlur(cinza, (5, 5), 0)
+                _, thresh = cv2.threshold(suavizada, 128, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
 
-            nota_calculada = 0.0
-            respostas_lidas = []
-            acertos = 0
-            total_questoes = len(gabarito_oficial)
-            
-            if total_questoes > 0:
-                contornos, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                bolinhas_validas = []
+                nota_calculada = 0.0
+                respostas_lidas = []
+                acertos = 0
+                total_questoes = len(gabarito_oficial)
                 
-                for c in contornos:
-                    (x, y, w, h) = cv2.boundingRect(c)
-                    proporcao = w / float(h)
-                    if 0.7 <= proporcao <= 1.3 and 15 <= w <= 60:
-                        bolinhas_validas.append(c)
-                
-                bolinhas_esperadas = total_questoes * 5
-                
-                st.write(f"ℹ️ Encontradas {len(bolinhas_validas)} formas circulares (Esperado: {bolinhas_esperadas}).")
-                
-                if len(bolinhas_validas) >= bolinhas_esperadas:
-                    st.write("📝 Processando marcações e calculando nota...")
+                if total_questoes > 0:
+                    contornos, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    bolinhas_validas = []
                     
-                    bolinhas_validas = sorted(bolinhas_validas, key=lambda b: cv2.boundingRect(b)[1])
+                    for c in contornos:
+                        (x, y, w, h) = cv2.boundingRect(c)
+                        proporcao = w / float(h)
+                        if 0.7 <= proporcao <= 1.3 and 15 <= w <= 60:
+                            bolinhas_validas.append(c)
                     
-                    for i in range(0, min(len(bolinhas_validas), bolinhas_esperadas), 5):
-                        linha = bolinhas_validas[i:i+5]
-                        linha = sorted(linha, key=lambda b: cv2.boundingRect(b)[0])
+                    bolinhas_esperadas = total_questoes * 5
+                    st.write(f"ℹ️ Encontradas {len(bolinhas_validas)} formas circulares (Esperado: {bolinhas_esperadas}).")
+                    
+                    if len(bolinhas_validas) >= bolinhas_esperadas:
+                        st.write("📝 Processando marcações e calculando nota...")
                         
-                        marcada = None
-                        max_pixels = 0
-                        area_media = 0
+                        bolinhas_validas = sorted(bolinhas_validas, key=lambda b: cv2.boundingRect(b)[1])
                         
-                        for j, bolinha in enumerate(linha):
-                            mask = np.zeros(thresh.shape, dtype="uint8")
-                            cv2.drawContours(mask, [bolinha], -1, 255, -1)
-                            mask = cv2.bitwise_and(thresh, thresh, mask=mask)
-                            total_pixels = cv2.countNonZero(mask)
+                        for i in range(0, min(len(bolinhas_validas), bolinhas_esperadas), 5):
+                            linha = bolinhas_validas[i:i+5]
+                            linha = sorted(linha, key=lambda b: cv2.boundingRect(b)[0])
                             
-                            if total_pixels > max_pixels:
-                                max_pixels = total_pixels
-                                marcada = j
-                                _, _, bw, bh = cv2.boundingRect(bolinha)
-                                area_media = bw * bh
+                            marcada = None
+                            max_pixels = 0
+                            area_media = 0
+                            
+                            for j, bolinha in enumerate(linha):
+                                mask = np.zeros(thresh.shape, dtype="uint8")
+                                cv2.drawContours(mask, [bolinha], -1, 255, -1)
+                                mask = cv2.bitwise_and(thresh, thresh, mask=mask)
+                                total_pixels = cv2.countNonZero(mask)
                                 
-                        letras = ['A', 'B', 'C', 'D', 'E']
-                        if marcada is not None and max_pixels > (area_media * 0.3):
-                            respostas_lidas.append(letras[marcada])
-                        else:
-                            respostas_lidas.append("Nula/Branco")
-                            
-                    for lida, oficial in zip(respostas_lidas, gabarito_oficial):
-                        if lida == oficial:
-                            acertos += 1
-                            
-                    nota_calculada = (acertos / total_questoes) * 10.0
-                    
-                    st.session_state.resultado_analise = {
-                        'prova_id': prova_id_detectada,
-                        'gabarito_oficial': gabarito_oficial,
-                        'respostas_lidas': respostas_lidas,
-                        'nota': nota_calculada,
-                        'acertos': acertos,
-                        'total_questoes': total_questoes
-                    }
-                    st.session_state.imagem_processada = foto_prova.file_id
-                    
-                    status.update(label="Correção Óptica Finalizada!", state="complete", expanded=False)
+                                if total_pixels > max_pixels:
+                                    max_pixels = total_pixels
+                                    marcada = j
+                                    _, _, bw, bh = cv2.boundingRect(bolinha)
+                                    area_media = bw * bh
+                                    
+                            letras = ['A', 'B', 'C', 'D', 'E']
+                            if marcada is not None and max_pixels > (area_media * 0.3):
+                                respostas_lidas.append(letras[marcada])
+                            else:
+                                respostas_lidas.append("Nula/Branco")
+                                
+                        for lida, oficial in zip(respostas_lidas, gabarito_oficial):
+                            if lida == oficial:
+                                acertos += 1
+                                
+                        nota_calculada = (acertos / total_questoes) * 10.0
+                        
+                        st.session_state.resultado_analise = {
+                            'prova_id': prova_id_detectada,
+                            'gabarito_oficial': gabarito_oficial,
+                            'respostas_lidas': respostas_lidas,
+                            'nota': nota_calculada,
+                            'acertos': acertos,
+                            'total_questoes': total_questoes
+                        }
+                        status.update(label="Correção Óptica Finalizada!", state="complete", expanded=False)
+                    else:
+                        status.update(label="Erro no enquadramento do gabarito", state="error", expanded=True)
+                        st.error(f"❌ O QR Code foi lido, mas a caixa de Gabarito cortou (Achou {len(bolinhas_validas)} de {bolinhas_esperadas} círculos). Tire uma foto completa.")
                 else:
-                    status.update(label="Erro no enquadramento do gabarito", state="error", expanded=True)
-                    st.error(f"❌ A câmera achou o QR Code perfeitamente, mas perdeu o Gabarito (Achou {len(bolinhas_validas)} de {bolinhas_esperadas} círculos). Tire uma foto sem cortar a caixa de gabarito à esquerda.")
-            else:
-                status.update(label="Nenhuma questão encontrada no QR Code", state="error", expanded=True)
+                    status.update(label="Nenhuma questão encontrada no QR Code", state="error", expanded=True)
 
+    # Renderiza o painel cruzado e o formulário APENAS se o passo_sucesso foi até o fim
     resultado = st.session_state.resultado_analise
     if resultado is not None and resultado['total_questoes'] > 0:
         
@@ -385,7 +381,6 @@ with aba_corrigir:
                 conn.commit()
                 conn.close()
                 
-                st.session_state.imagem_processada = None
                 st.session_state.resultado_analise = None
                 st.session_state.sucesso_salvamento = True
                 st.rerun()
