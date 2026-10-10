@@ -119,7 +119,35 @@ def gerar_pdf(titulo, questoes, quantidade):
             pdf.image(qr_path, x=175, y=y_ancora, w=25)
             y_fim_qr = y_ancora + 25
             
-            pos_y_linha = max(y_fim_aluno, y_fim_gabarito, y_fim_qr) + 5
+            # --- NOVO: DESENHO DAS MARCAS FIDUCIAIS (ALVOS DE ESCANEAMENTO) ---
+            max_y_alvos = max(y_fim_gabarito, y_fim_qr)
+            margem = 5
+            
+            # Coordenadas dos 4 cantos que englobam a Caixa de Gabarito (esq) e o QR Code (dir)
+            alvos = [
+                (100, y_ancora - margem),           # Superior Esquerdo
+                (205, y_ancora - margem),           # Superior Direito
+                (100, max_y_alvos + margem),        # Inferior Esquerdo
+                (205, max_y_alvos + margem)         # Inferior Direito
+            ]
+            
+            # Desenha as bolinhas com cruzes (Padrão OMR Oficial)
+            pdf.set_draw_color(0, 0, 0)
+            pdf.set_line_width(0.6) # Linha mais grossa para a câmera captar facilmente
+            
+            for cx, cy in alvos:
+                raio = 3
+                # Desenha o círculo
+                pdf.ellipse(cx - raio, cy - raio, raio * 2, raio * 2, style='D')
+                # Desenha a linha horizontal da cruz
+                pdf.line(cx - raio - 2, cy, cx + raio + 2, cy)
+                # Desenha a linha vertical da cruz
+                pdf.line(cx, cy - raio - 2, cx, cy + raio + 2)
+                
+            pdf.set_line_width(0.2) # Reseta a grossura da linha para o resto do documento
+            # --- FIM DAS MARCAS FIDUCIAIS ---
+            
+            pos_y_linha = max_y_alvos + 12
             pdf.set_y(pos_y_linha)
             pdf.line(10, pdf.get_y(), 200, pdf.get_y())
             pdf.ln(5)
@@ -210,7 +238,7 @@ with aba_gerar:
 # ABA 2: MÓDULO DE ESCANEAMENTO (OMR INTELIGENTE)
 # ==========================================
 with aba_corrigir:
-    st.write("Afaste um pouco a câmera ou envie um print contendo o Gabarito e o QR Code.")
+    st.write("Tire uma foto ou envie um print enquadrando os **4 alvos (bolinhas com cruzes)** que ficam ao redor do Gabarito e do QR Code.")
     
     if 'imagem_processada' not in st.session_state:
         st.session_state.imagem_processada = None
@@ -219,7 +247,7 @@ with aba_corrigir:
     if 'sucesso_salvamento' not in st.session_state:
         st.session_state.sucesso_salvamento = False
         
-    foto_prova = st.file_uploader("📷 Enviar Foto ou Print", type=['png', 'jpg', 'jpeg'])
+    foto_prova = st.file_uploader("📷 Enviar Foto ou Print do Quadro de Respostas", type=['png', 'jpg', 'jpeg'])
     
     if st.session_state.sucesso_salvamento:
         st.success("✨ Avaliação salva com sucesso no banco de dados!")
@@ -235,12 +263,9 @@ with aba_corrigir:
             st.write("🔄 Tratando formato e peso da imagem do celular...")
             
             try:
-                # O grande ajuste do Resize First imune a Memory Leaks em mobile:
-                # Limita diretamente a imagem no carregamento via buffer de memória antes de entregar pro OpenCV
                 imagem_pil = Image.open(io.BytesIO(foto_prova.getvalue()))
                 imagem_pil = ImageOps.exif_transpose(imagem_pil)
                 
-                # Se a imagem tiver uma resolução gigantesca, ela é comprimida na marra
                 MAX_SIZE = (1280, 1280)
                 imagem_pil.thumbnail(MAX_SIZE, Image.Resampling.LANCZOS)
                 
@@ -256,7 +281,7 @@ with aba_corrigir:
             
             prova_id_detectada = "DESCONHECIDO"
             gabarito_oficial = []
-            qr_rect = None
+            codigo_qr_lido = None
             
             if passo_sucesso:
                 st.write("🔍 Extraindo informações do QR Code...")
@@ -264,9 +289,8 @@ with aba_corrigir:
                 conteudo_qr = None
                 
                 if codigos_lidos:
-                    codigo = codigos_lidos[0]
-                    conteudo_qr = codigo.data.decode("utf-8")
-                    qr_rect = codigo.rect
+                    codigo_qr_lido = codigos_lidos[0]
+                    conteudo_qr = codigo_qr_lido.data.decode("utf-8")
                 
                 if conteudo_qr:
                     if "|" in conteudo_qr:
