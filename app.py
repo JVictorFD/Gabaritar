@@ -260,7 +260,7 @@ with aba_corrigir:
                 if codigos_lidos:
                     codigo = codigos_lidos[0]
                     conteudo_qr = codigo.data.decode("utf-8")
-                    qr_rect = codigo.rect  # Retorna: left, top, width, height
+                    qr_rect = codigo.rect
                 
                 if conteudo_qr:
                     if "|" in conteudo_qr:
@@ -283,17 +283,18 @@ with aba_corrigir:
                 st.write("📐 Alinhando grade matemática do Gabarito...")
                 cinza = cv2.cvtColor(img_cv2_orig, cv2.COLOR_BGR2GRAY)
                 suavizada = cv2.GaussianBlur(cinza, (5, 5), 0)
-                # Inverte a imagem: tudo que é tinta preta vira branco absoluto. O papel vira preto.
                 _, thresh = cv2.threshold(suavizada, 128, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
 
                 N_questoes = len(gabarito_oficial)
-                # Dimensões matemáticas fixas para achatar a caixa do gabarito uniformemente
                 target_w = 650
                 target_h = 100 + 60 * N_questoes
                 
-                contornos, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                # --- NOVO: FECHAMENTO MORFOLÓGICO PARA PRINTS INCOMPLETOS ---
+                # A imagem do usuário pode ter cortado a borda de baixo. O Dilate conecta as linhas pretas grossas.
+                kernel = np.ones((7, 7), np.uint8)
+                borda_forte = cv2.dilate(thresh, kernel, iterations=2)
+                contornos, _ = cv2.findContours(borda_forte, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 
-                # Proporção ideal da caixa do gabarito gerada pelo seu PDF
                 target_ratio = 65.0 / (10 + 6 * N_questoes)
                 melhor_contorno = None
                 menor_erro = 1000
@@ -303,12 +304,10 @@ with aba_corrigir:
                     aproximacao = cv2.approxPolyDP(c, 0.04 * perimetro, True)
                     if len(aproximacao) == 4:
                         x, y, w, h = cv2.boundingRect(aproximacao)
-                        # A caixa do gabarito tem que ser relativamente grande e estar à esquerda do QR Code
                         if w > 50 and h > 50 and (x + w/2 < qr_rect.left + qr_rect.width):
                             ratio = w / float(h)
                             erro = abs(ratio - target_ratio) / target_ratio
-                            # Margem de tolerância de 25% para a proporção do retângulo
-                            if erro < 0.25: 
+                            if erro < 0.35: # Tolerância aumentada para prints mal recortados
                                 if erro < menor_erro:
                                     menor_erro = erro
                                     melhor_contorno = aproximacao
@@ -321,8 +320,7 @@ with aba_corrigir:
                     matriz = cv2.getPerspectiveTransform(pontos_doc, pontos_destino)
                     gabarito_warped = cv2.warpPerspective(thresh, matriz, (target_w, target_h))
                 else:
-                    st.write("⚠️ Contorno da caixa não encontrado. Aplicando inferência geométrica a partir do QR Code...")
-                    # Se for um Print de tela e a borda cortar, ele calcula a posição da caixa baseado no QR Code!
+                    st.write("⚠️ Contorno da caixa corrompido ou cortado. Aplicando inferência geométrica rígida pelo QR Code...")
                     K = qr_rect.width / 25.0
                     gab_x = max(0, int(qr_rect.left - 70 * K))
                     gab_y = max(0, int(qr_rect.top))
@@ -338,39 +336,37 @@ with aba_corrigir:
                         passo_sucesso = False
                         
                 if passo_sucesso and gabarito_warped is not None:
-                    st.write("📝 Medindo densidade de tinta por questão (ignorando bolinhas vazias)...")
+                    st.write("📝 Avaliando contraste estatístico da tinta para ignorar bolinhas vazias...")
                     
                     respostas_lidas = []
                     acertos = 0
                     letras = ['A', 'B', 'C', 'D', 'E']
                     
-                    # Como a imagem foi convertida para um padrão 650x(100+60N), sabemos a localização exata de cada letra
                     for i in range(N_questoes):
                         y_centro = 105 + i * 60
                         densidades = []
                         
                         for j in range(5):
                             x_centro = 130 + j * 100
-                            
-                            # Faz um recorte pequeno (50x30 pixels) exatamente no miolo de onde a letra deveria estar
                             cell_roi = gabarito_warped[max(0, y_centro - 15) : y_centro + 15, max(0, x_centro - 25) : x_centro + 25]
                             
                             if cell_roi.size > 0:
-                                total_pixels = cell_roi.shape[0] * cell_roi.shape[1]
-                                pixels_brancos = cv2.countNonZero(cell_roi) # Pixels brancos = tinta preta detectada
-                                densidade = pixels_brancos / float(total_pixels)
+                                pixels_brancos = cv2.countNonZero(cell_roi) 
+                                densidades.append(pixels_brancos)
                             else:
-                                densidade = 0.0
-                                
-                            densidades.append(densidade)
-                            
-                        # Avalia a opção mais escura daquela questão
-                        max_dens = max(densidades)
-                        idx_marcada = densidades.index(max_dens)
+                                densidades.append(0)
                         
-                        # Uma letra "O" puramente vazia atinge no máximo ~20% de densidade devido à sua borda fina.
-                        # Se o aluno preencheu, o bloco escuro passa facilmente dos 50%.
-                        if max_dens > 0.40:
+                        # --- NOVO: LÓGICA ESTATÍSTICA COMPARATIVA (Z-Score rudimentar) ---
+                        # Em vez de um limite percentual fixo que falha em fotos escuras, o sistema
+                        # olha para a média de tinta das 5 opções. 
+                        # Uma opção só é validada como "marcada" se ela tiver MUITO MAIS TINTA (pelo menos 50% mais escura)
+                        # do que a média daquela mesma linha. Se todas forem similares (ex: todas vazias), é Em Branco.
+                        media_linha = np.mean(densidades)
+                        max_densidade = max(densidades)
+                        
+                        # A margem segura: A opção mais pintada tem que ser 1.5x mais preta que a média da linha inteira
+                        if max_densidade > (media_linha * 1.5) and max_densidade > 100: 
+                            idx_marcada = densidades.index(max_densidade)
                             respostas_lidas.append(letras[idx_marcada])
                         else:
                             respostas_lidas.append("Em Branco")
@@ -391,7 +387,7 @@ with aba_corrigir:
                     }
                     status.update(label="Correção Óptica Finalizada!", state="complete", expanded=False)
 
-    # Renderiza o painel cruzado e o formulário
+    # Renderiza o painel cruzado
     resultado = st.session_state.resultado_analise
     if resultado is not None and resultado['total_questoes'] > 0:
         
