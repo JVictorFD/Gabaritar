@@ -260,7 +260,7 @@ with aba_corrigir:
     if 'sucesso_salvamento' not in st.session_state:
         st.session_state.sucesso_salvamento = False
         
-    foto_prova = st.file_uploader("📷 Enviar Foto ou Print do Quadro de Respostas", type=['png', 'jpg', 'jpeg'])
+    foto_prova = st.file_uploader("📷 Fazer upload de Imagem ou Print do Quadro de Respostas", type=['png', 'jpg', 'jpeg'], accept_multiple_files=False)
     
     if st.session_state.sucesso_salvamento:
         st.success("✨ Avaliação salva com sucesso no banco de dados!")
@@ -276,19 +276,14 @@ with aba_corrigir:
             st.write("🔄 Otimizando carregamento de memória do celular...")
             
             try:
-                # 1. Abre a foto a partir do buffer sem duplicar os bytes (Evita OOM)
                 imagem_pil = Image.open(foto_prova)
                 
-                # 2. SEGREDO: Reduz as fotos gigantescas da câmera (ex: 50MP) para um tamanho amigável
-                # ANTES de forçar qualquer operação em tela cheia que demande RAM excessiva.
                 imagem_pil.thumbnail((1500, 1500), Image.Resampling.LANCZOS)
                 
-                # 3. Só agora que a foto é pequena, rotacionamos para ajustar a orientação (EXIF)
                 imagem_pil = ImageOps.exif_transpose(imagem_pil)
                 
                 array_pil = np.array(imagem_pil)
                 
-                # Tratamento seguro caso a imagem lida venha em Grayscale ou RGBA
                 if len(array_pil.shape) == 3:
                     if array_pil.shape[2] == 4: 
                         array_pil = cv2.cvtColor(array_pil, cv2.COLOR_RGBA2RGB)
@@ -308,7 +303,6 @@ with aba_corrigir:
             
             if passo_sucesso:
                 st.write("🔍 Extraindo informações do QR Code...")
-                # O PyZbar roda de forma extremamente mais rápida em imagens convertidas para Escala de Cinza
                 cinza_para_qr = cv2.cvtColor(img_cv2_orig, cv2.COLOR_BGR2GRAY)
                 codigos_lidos = decode(cinza_para_qr)
                 conteudo_qr = None
