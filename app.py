@@ -15,7 +15,7 @@ from pyzbar.pyzbar import decode
 
 st.set_page_config(page_title="Gabaritar - Sistema OMR", page_icon="📝", layout="wide")
 
-# --- FUNÇÃO MATEMÁTICA PARA CORREÇÃO DE PERSPECTIVA ---
+# --- FUNÇÕES MATEMÁTICAS E DE VISÃO COMPUTACIONAL ---
 def ordenar_pontos(pontos):
     pontos = pontos.reshape((4, 2))
     nova_ordem = np.zeros((4, 2), dtype=np.float32)
@@ -26,6 +26,27 @@ def ordenar_pontos(pontos):
     nova_ordem[1] = pontos[np.argmin(diff)]       # Top-Right
     nova_ordem[3] = pontos[np.argmax(diff)]       # Bottom-Left
     return nova_ordem
+
+def encontrar_centro_massa(imagem_binaria, x_esperado, y_esperado, janela=60):
+    """
+    Procura a maior concentração de tinta preta (o centro da cruz fiducial) 
+    dentro de uma pequena janela ao redor da coordenada esperada.
+    """
+    y1, y2 = max(0, int(y_esperado - janela)), min(imagem_binaria.shape[0], int(y_esperado + janela))
+    x1, x2 = max(0, int(x_esperado - janela)), min(imagem_binaria.shape[1], int(x_esperado + janela))
+    roi = imagem_binaria[y1:y2, x1:x2]
+    
+    if roi.size == 0:
+        return (x_esperado, y_esperado)
+        
+    M = cv2.moments(roi)
+    # Se não houver tinta na região, retorna a coordenada matemática bruta
+    if M['m00'] == 0:
+        return (x_esperado, y_esperado)
+        
+    cx = int(M['m10'] / M['m00'])
+    cy = int(M['m01'] / M['m00'])
+    return (x1 + cx, y1 + cy)
 
 # --- BANCO DE DADOS LOCAL ---
 def inicializar_banco():
@@ -78,7 +99,9 @@ def gerar_pdf(titulo, questoes, quantidade):
             
             pdf.set_font("Arial", "B", 16)
             pdf.cell(0, 10, higienizar_texto(titulo), ln=1, align="C")
-            pdf.ln(2)
+            
+            # RECUO ADICIONADO: Previne que o título suje a marca fiducial
+            pdf.ln(8) 
             
             y_ancora = pdf.get_y()
             
@@ -119,11 +142,10 @@ def gerar_pdf(titulo, questoes, quantidade):
             pdf.image(qr_path, x=175, y=y_ancora, w=25)
             y_fim_qr = y_ancora + 25
             
-            # --- NOVO: DESENHO DAS MARCAS FIDUCIAIS (ALVOS DE ESCANEAMENTO) ---
+            # --- MARCAS FIDUCIAIS (ALVOS DE ESCANEAMENTO) ---
             max_y_alvos = max(y_fim_gabarito, y_fim_qr)
             margem = 5
             
-            # Coordenadas dos 4 cantos que englobam a Caixa de Gabarito (esq) e o QR Code (dir)
             alvos = [
                 (100, y_ancora - margem),           # Superior Esquerdo
                 (205, y_ancora - margem),           # Superior Direito
@@ -131,20 +153,16 @@ def gerar_pdf(titulo, questoes, quantidade):
                 (205, max_y_alvos + margem)         # Inferior Direito
             ]
             
-            # Desenha as bolinhas com cruzes (Padrão OMR Oficial)
             pdf.set_draw_color(0, 0, 0)
-            pdf.set_line_width(0.6) # Linha mais grossa para a câmera captar facilmente
+            pdf.set_line_width(0.6) 
             
             for cx, cy in alvos:
                 raio = 3
-                # Desenha o círculo
                 pdf.ellipse(cx - raio, cy - raio, raio * 2, raio * 2, style='D')
-                # Desenha a linha horizontal da cruz
                 pdf.line(cx - raio - 2, cy, cx + raio + 2, cy)
-                # Desenha a linha vertical da cruz
                 pdf.line(cx, cy - raio - 2, cx, cy + raio + 2)
                 
-            pdf.set_line_width(0.2) # Reseta a grossura da linha para o resto do documento
+            pdf.set_line_width(0.2)
             # --- FIM DAS MARCAS FIDUCIAIS ---
             
             pos_y_linha = max_y_alvos + 12
@@ -310,7 +328,6 @@ with aba_corrigir:
                     passo_sucesso = False
             
             if passo_sucesso and gabarito_oficial:
-                st.write("📐 Ancorando grade matemática pelo QR Code...")
                 
                 cinza = cv2.cvtColor(img_cv2_orig, cv2.COLOR_BGR2GRAY)
                 suavizada = cv2.GaussianBlur(cinza, (5, 5), 0)
@@ -318,44 +335,66 @@ with aba_corrigir:
 
                 N_questoes = len(gabarito_oficial)
                 
+                # ESTÁGIO 1: Ancoragem Geral pelo QR Code para gerar a escala geométrica real
+                st.write("📐 Estágio 1: Mapeando Escala Geométrica via QR Code...")
                 if len(codigo_qr_lido.polygon) == 4:
-                    pts = np.array([[p.x, p.y] for p in codigo_qr_lido.polygon], dtype="float32")
+                    pts_qr = np.array([[p.x, p.y] for p in codigo_qr_lido.polygon], dtype="float32")
                 else:
                     rect = codigo_qr_lido.rect
-                    pts = np.array([
+                    pts_qr = np.array([
                         [rect.left, rect.top],
                         [rect.left + rect.width, rect.top],
                         [rect.left + rect.width, rect.top + rect.height],
                         [rect.left, rect.top + rect.height]
                     ], dtype="float32")
                 
-                pts = ordenar_pontos(pts)
+                pts_qr = ordenar_pontos(pts_qr)
                 
-                pts_dst = np.array([
-                    [709, 9],
-                    [941, 9],
-                    [941, 241],
-                    [709, 241]
+                # Mapeia o QR para um Canvas estrito onde 10 pixels = 1 milímetro do PDF
+                pts_canvas = np.array([
+                    [1750, 500], [2000, 500], [2000, 750], [1750, 750]
                 ], dtype="float32")
                 
-                matriz = cv2.getPerspectiveTransform(pts, pts_dst)
+                matriz_escala = cv2.getPerspectiveTransform(pts_qr, pts_canvas)
                 
-                target_w = 1000
-                target_h = max(300, 150 + N_questoes * 60)
-                gabarito_warped = cv2.warpPerspective(thresh, matriz, (target_w, target_h), flags=cv2.INTER_NEAREST)
+                altura_canvas = max(1000, int(500 + (15 + 6 * N_questoes) * 10 + 200))
+                warped_estagio1 = cv2.warpPerspective(thresh, matriz_escala, (2500, altura_canvas), flags=cv2.INTER_NEAREST)
                 
-                st.write("📝 Avaliando densidade de tinta por célula estatística...")
+                # ESTÁGIO 2: Caça ativamente as cruzes fiduciais e gera o Micro-Warp
+                st.write("🎯 Estágio 2: Rastreando Alvos Fiduciais para Micro-Warping de precisão...")
+                
+                # Coordenadas matemáticas exatas onde as 4 cruzes deveriam estar
+                delta_y = (15 + 6 * N_questoes) * 10
+                ideal_tl = (1000, 450)
+                ideal_tr = (2050, 450)
+                ideal_bl = (1000, 500 + delta_y)
+                ideal_br = (2050, 500 + delta_y)
+                
+                # Busca o centro da massa de tinta (a cruz) na vida real para arrumar distorções da folha
+                real_tl = encontrar_centro_massa(warped_estagio1, ideal_tl[0], ideal_tl[1])
+                real_tr = encontrar_centro_massa(warped_estagio1, ideal_tr[0], ideal_tr[1])
+                real_bl = encontrar_centro_massa(warped_estagio1, ideal_bl[0], ideal_bl[1])
+                real_br = encontrar_centro_massa(warped_estagio1, ideal_br[0], ideal_br[1])
+                
+                pts_reais = np.array([real_tl, real_tr, real_br, real_bl], dtype="float32")
+                pts_ideais = np.array([ideal_tl, ideal_tr, ideal_br, ideal_bl], dtype="float32")
+                
+                matriz_final = cv2.getPerspectiveTransform(pts_reais, pts_ideais)
+                warped_final = cv2.warpPerspective(warped_estagio1, matriz_final, (2500, altura_canvas), flags=cv2.INTER_NEAREST)
+                
+                st.write("📝 Avaliando densidade de tinta das marcações...")
                 respostas_lidas = []
                 acertos = 0
                 letras = ['A', 'B', 'C', 'D', 'E']
                 
                 for i in range(N_questoes):
-                    y_centro = 105 + i * 60
+                    y_centro = 605 + i * 60
                     densidades = []
                     
                     for j in range(5):
-                        x_centro = 130 + j * 100
-                        cell_roi = gabarito_warped[max(0, y_centro - 20) : y_centro + 20, max(0, x_centro - 30) : x_centro + 30]
+                        x_centro = 1120 + j * 100
+                        # Recorta o miolo exato da bolinha
+                        cell_roi = warped_final[max(0, y_centro - 20) : y_centro + 20, max(0, x_centro - 30) : x_centro + 30]
                         
                         if cell_roi.size > 0:
                             pixels_brancos = cv2.countNonZero(cell_roi) 
