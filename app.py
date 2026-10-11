@@ -8,7 +8,6 @@ import cv2
 import numpy as np
 import sqlite3
 import pandas as pd
-import io
 from PIL import Image, ImageOps
 
 from pyzbar.pyzbar import decode
@@ -40,7 +39,6 @@ def encontrar_centro_massa(imagem_binaria, x_esperado, y_esperado, janela=60):
         return (x_esperado, y_esperado)
         
     M = cv2.moments(roi)
-    # Se não houver tinta na região, retorna a coordenada matemática bruta
     if M['m00'] == 0:
         return (x_esperado, y_esperado)
         
@@ -100,7 +98,6 @@ def gerar_pdf(titulo, questoes, quantidade):
             pdf.set_font("Arial", "B", 16)
             pdf.cell(0, 10, higienizar_texto(titulo), ln=1, align="C")
             
-            # RECUO ADICIONADO: Previne que o título suje a marca fiducial
             pdf.ln(8) 
             
             y_ancora = pdf.get_y()
@@ -142,15 +139,14 @@ def gerar_pdf(titulo, questoes, quantidade):
             pdf.image(qr_path, x=175, y=y_ancora, w=25)
             y_fim_qr = y_ancora + 25
             
-            # --- MARCAS FIDUCIAIS (ALVOS DE ESCANEAMENTO) ---
             max_y_alvos = max(y_fim_gabarito, y_fim_qr)
             margem = 5
             
             alvos = [
-                (100, y_ancora - margem),           # Superior Esquerdo
-                (205, y_ancora - margem),           # Superior Direito
-                (100, max_y_alvos + margem),        # Inferior Esquerdo
-                (205, max_y_alvos + margem)         # Inferior Direito
+                (100, y_ancora - margem),
+                (205, y_ancora - margem),
+                (100, max_y_alvos + margem),
+                (205, max_y_alvos + margem)
             ]
             
             pdf.set_draw_color(0, 0, 0)
@@ -163,7 +159,6 @@ def gerar_pdf(titulo, questoes, quantidade):
                 pdf.line(cx, cy - raio - 2, cx, cy + raio + 2)
                 
             pdf.set_line_width(0.2)
-            # --- FIM DAS MARCAS FIDUCIAIS ---
             
             pos_y_linha = max_y_alvos + 12
             pdf.set_y(pos_y_linha)
@@ -278,23 +273,33 @@ with aba_corrigir:
         
         with st.status("Iniciando escaneamento da prova...", expanded=True) as status:
             passo_sucesso = True
-            st.write("🔄 Tratando formato e peso da imagem do celular...")
+            st.write("🔄 Otimizando carregamento de memória do celular...")
             
             try:
-                imagem_pil = Image.open(io.BytesIO(foto_prova.getvalue()))
+                # 1. Abre a foto a partir do buffer sem duplicar os bytes (Evita OOM)
+                imagem_pil = Image.open(foto_prova)
+                
+                # 2. SEGREDO: Reduz as fotos gigantescas da câmera (ex: 50MP) para um tamanho amigável
+                # ANTES de forçar qualquer operação em tela cheia que demande RAM excessiva.
+                imagem_pil.thumbnail((1500, 1500), Image.Resampling.LANCZOS)
+                
+                # 3. Só agora que a foto é pequena, rotacionamos para ajustar a orientação (EXIF)
                 imagem_pil = ImageOps.exif_transpose(imagem_pil)
                 
-                MAX_SIZE = (1280, 1280)
-                imagem_pil.thumbnail(MAX_SIZE, Image.Resampling.LANCZOS)
-                
                 array_pil = np.array(imagem_pil)
-                if array_pil.shape[2] == 4: 
-                    array_pil = cv2.cvtColor(array_pil, cv2.COLOR_RGBA2RGB)
-                img_cv2_orig = cv2.cvtColor(array_pil, cv2.COLOR_RGB2BGR)
-                st.write("📸 Imagem otimizada e carregada na memória com sucesso.")
+                
+                # Tratamento seguro caso a imagem lida venha em Grayscale ou RGBA
+                if len(array_pil.shape) == 3:
+                    if array_pil.shape[2] == 4: 
+                        array_pil = cv2.cvtColor(array_pil, cv2.COLOR_RGBA2RGB)
+                    img_cv2_orig = cv2.cvtColor(array_pil, cv2.COLOR_RGB2BGR)
+                else:
+                    img_cv2_orig = cv2.cvtColor(array_pil, cv2.COLOR_GRAY2BGR)
+                    
+                st.write("📸 Imagem otimizada e carregada com sucesso.")
             except Exception as e:
                 status.update(label="Falha ao decodificar a foto", state="error", expanded=True)
-                st.error(f"❌ Erro ao decodificar a foto do celular: {e}")
+                st.error(f"❌ Erro de decodificação na leitura do arquivo: {e}")
                 passo_sucesso = False
             
             prova_id_detectada = "DESCONHECIDO"
@@ -303,7 +308,9 @@ with aba_corrigir:
             
             if passo_sucesso:
                 st.write("🔍 Extraindo informações do QR Code...")
-                codigos_lidos = decode(img_cv2_orig)
+                # O PyZbar roda de forma extremamente mais rápida em imagens convertidas para Escala de Cinza
+                cinza_para_qr = cv2.cvtColor(img_cv2_orig, cv2.COLOR_BGR2GRAY)
+                codigos_lidos = decode(cinza_para_qr)
                 conteudo_qr = None
                 
                 if codigos_lidos:
@@ -324,7 +331,7 @@ with aba_corrigir:
                         st.write(f"⚠️ Atenção: QR lido ({prova_id_detectada}), mas sem gabarito atrelado.")
                 else:
                     status.update(label="Falha na leitura do QR Code", state="error", expanded=True)
-                    st.error("❌ O sistema não encontrou o QR Code. Certifique-se de que a imagem contém o código nítido.")
+                    st.error("❌ O sistema não encontrou o QR Code. Tente limpar a lente do celular e evitar sombras pesadas.")
                     passo_sucesso = False
             
             if passo_sucesso and gabarito_oficial:
@@ -335,7 +342,6 @@ with aba_corrigir:
 
                 N_questoes = len(gabarito_oficial)
                 
-                # ESTÁGIO 1: Ancoragem Geral pelo QR Code para gerar a escala geométrica real
                 st.write("📐 Estágio 1: Mapeando Escala Geométrica via QR Code...")
                 if len(codigo_qr_lido.polygon) == 4:
                     pts_qr = np.array([[p.x, p.y] for p in codigo_qr_lido.polygon], dtype="float32")
@@ -350,7 +356,6 @@ with aba_corrigir:
                 
                 pts_qr = ordenar_pontos(pts_qr)
                 
-                # Mapeia o QR para um Canvas estrito onde 10 pixels = 1 milímetro do PDF
                 pts_canvas = np.array([
                     [1750, 500], [2000, 500], [2000, 750], [1750, 750]
                 ], dtype="float32")
@@ -360,17 +365,14 @@ with aba_corrigir:
                 altura_canvas = max(1000, int(500 + (15 + 6 * N_questoes) * 10 + 200))
                 warped_estagio1 = cv2.warpPerspective(thresh, matriz_escala, (2500, altura_canvas), flags=cv2.INTER_NEAREST)
                 
-                # ESTÁGIO 2: Caça ativamente as cruzes fiduciais e gera o Micro-Warp
                 st.write("🎯 Estágio 2: Rastreando Alvos Fiduciais para Micro-Warping de precisão...")
                 
-                # Coordenadas matemáticas exatas onde as 4 cruzes deveriam estar
                 delta_y = (15 + 6 * N_questoes) * 10
                 ideal_tl = (1000, 450)
                 ideal_tr = (2050, 450)
                 ideal_bl = (1000, 500 + delta_y)
                 ideal_br = (2050, 500 + delta_y)
                 
-                # Busca o centro da massa de tinta (a cruz) na vida real para arrumar distorções da folha
                 real_tl = encontrar_centro_massa(warped_estagio1, ideal_tl[0], ideal_tl[1])
                 real_tr = encontrar_centro_massa(warped_estagio1, ideal_tr[0], ideal_tr[1])
                 real_bl = encontrar_centro_massa(warped_estagio1, ideal_bl[0], ideal_bl[1])
@@ -393,7 +395,6 @@ with aba_corrigir:
                     
                     for j in range(5):
                         x_centro = 1120 + j * 100
-                        # Recorta o miolo exato da bolinha
                         cell_roi = warped_final[max(0, y_centro - 20) : y_centro + 20, max(0, x_centro - 30) : x_centro + 30]
                         
                         if cell_roi.size > 0:
